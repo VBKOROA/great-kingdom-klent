@@ -1,18 +1,11 @@
 use std::{env, fmt, path::Path, time::Instant};
 
+use great_kingdom_engine::game::{ACTION_SPACE, BOARD_SIZE};
+use great_kingdom_features::{EvalRequest, FEATURE_CHANNELS};
 use ort::{
     execution_providers,
     session::{Session, builder::GraphOptimizationLevel},
     value::Tensor,
-};
-use pyo3::{
-    exceptions::{PyRuntimeError, PyValueError},
-    prelude::*,
-};
-
-use crate::{
-    eval_request::EvalRequest,
-    game::{ACTION_SPACE, BOARD_SIZE, FEATURE_CHANNELS},
 };
 
 use super::profile::{
@@ -54,7 +47,6 @@ pub struct NetworkOutput {
     pub q_values: Option<Vec<[f32; ACTION_SPACE]>>,
 }
 
-#[pyclass(unsendable)]
 pub struct OnnxEvaluator {
     session: Session,
     config: OnnxEvaluatorConfig,
@@ -98,23 +90,9 @@ impl From<ort::Error> for OnnxError {
     }
 }
 
-#[pymethods]
 impl OnnxEvaluator {
-    #[new]
-    #[pyo3(signature = (path, device = "cpu", max_batch_size = 256))]
-    fn py_new(path: &str, device: &str, max_batch_size: usize) -> PyResult<Self> {
-        Self::load(
-            path,
-            OnnxEvaluatorConfig {
-                device: parse_device(device)?,
-                max_batch_size,
-            },
-        )
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))
-    }
-
     #[must_use]
-    fn device(&self) -> &'static str {
+    pub fn device(&self) -> &'static str {
         match self.config.device {
             OnnxDevice::Cpu => "cpu",
             OnnxDevice::Cuda => "cuda",
@@ -122,24 +100,37 @@ impl OnnxEvaluator {
     }
 
     #[must_use]
-    fn max_batch_size(&self) -> usize {
+    pub fn max_batch_size(&self) -> usize {
         self.config.max_batch_size
     }
 
-    fn evaluate(&mut self, request: &EvalRequest) -> PyResult<(Vec<Vec<f32>>, Vec<f32>)> {
-        let output = self
-            .evaluate_request(request)
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+    #[must_use]
+    pub fn has_q_values_output(&self) -> bool {
+        self.has_q_values_output
+    }
+
+    #[must_use]
+    pub fn output_names(&self) -> Vec<String> {
+        self.session
+            .outputs
+            .iter()
+            .map(|output| output.name.clone())
+            .collect()
+    }
+
+    pub fn evaluate(
+        &mut self,
+        request: &EvalRequest,
+    ) -> Result<(Vec<Vec<f32>>, Vec<f32>), OnnxError> {
+        let output = self.evaluate_request(request)?;
         Ok((
             output.policy_logits.into_iter().map(Vec::from).collect(),
             output.values,
         ))
     }
 
-    fn evaluate_with_q(&mut self, request: &EvalRequest) -> PyResult<EvaluatedWithQ> {
-        let output = self
-            .evaluate_request_with_q(request)
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+    pub fn evaluate_with_q(&mut self, request: &EvalRequest) -> Result<EvaluatedWithQ, OnnxError> {
+        let output = self.evaluate_request_with_q(request)?;
         let q_values = output
             .q_values
             .expect("evaluate_request_with_q always returns q values");
@@ -149,24 +140,11 @@ impl OnnxEvaluator {
             q_values.into_iter().map(Vec::from).collect(),
         ))
     }
-
-    #[must_use]
-    fn has_q_values_output(&self) -> bool {
-        self.has_q_values_output
-    }
-
-    #[must_use]
-    fn output_names(&self) -> Vec<String> {
-        self.session
-            .outputs
-            .iter()
-            .map(|output| output.name.clone())
-            .collect()
-    }
 }
 
 impl OnnxEvaluator {
-    pub(crate) fn supports_q_values_output(&self) -> bool {
+    #[must_use]
+    pub fn supports_q_values_output(&self) -> bool {
         self.has_q_values_output
     }
 
@@ -306,7 +284,7 @@ impl OnnxEvaluator {
         Ok(output)
     }
 
-    pub(crate) fn set_gumbel_root_profile_context(&mut self, active_games: usize) {
+    pub fn set_gumbel_root_profile_context(&mut self, active_games: usize) {
         self.profile_context = Some(OnnxEvalProfileContext {
             source: "gumbel_root",
             wave: None,
@@ -315,7 +293,7 @@ impl OnnxEvaluator {
         });
     }
 
-    pub(crate) fn set_gumbel_leaf_profile_context(
+    pub fn set_gumbel_leaf_profile_context(
         &mut self,
         wave: u64,
         active_games: usize,
@@ -428,11 +406,11 @@ impl BatchBucketConfig {
     }
 }
 
-pub(crate) fn parse_device(device: &str) -> PyResult<OnnxDevice> {
+pub fn parse_device(device: &str) -> Result<OnnxDevice, OnnxError> {
     match device {
         "cpu" => Ok(OnnxDevice::Cpu),
         "cuda" => Ok(OnnxDevice::Cuda),
-        other => Err(PyValueError::new_err(format!(
+        other => Err(OnnxError::InvalidConfig(format!(
             "unsupported ONNX device {other:?}; expected 'cpu' or 'cuda'"
         ))),
     }
@@ -444,7 +422,7 @@ fn validate_config(config: OnnxEvaluatorConfig) -> Result<(), OnnxError> {
             "max_batch_size must be positive".to_string(),
         ));
     }
-    if matches!(config.device, OnnxDevice::Cuda) && !cfg!(feature = "onnx-cuda") {
+    if matches!(config.device, OnnxDevice::Cuda) && !cfg!(feature = "cuda") {
         return Err(OnnxError::InvalidConfig(
             "onnx-cuda feature is required for CUDA inference".to_string(),
         ));
@@ -629,7 +607,7 @@ fn env_flag_default_true(name: &str) -> bool {
     )
 }
 
-#[cfg(feature = "onnx-cuda")]
+#[cfg(feature = "cuda")]
 fn cuda_execution_providers() -> Vec<execution_providers::ExecutionProviderDispatch> {
     vec![
         execution_providers::CUDAExecutionProvider::default()
@@ -638,7 +616,7 @@ fn cuda_execution_providers() -> Vec<execution_providers::ExecutionProviderDispa
     ]
 }
 
-#[cfg(not(feature = "onnx-cuda"))]
+#[cfg(not(feature = "cuda"))]
 fn cuda_execution_providers() -> Vec<execution_providers::ExecutionProviderDispatch> {
     unreachable!("CUDA config is rejected unless the onnx-cuda feature is enabled")
 }
@@ -658,7 +636,7 @@ mod tests {
         assert_eq!(error.to_string(), "max_batch_size must be positive");
     }
 
-    #[cfg(not(feature = "onnx-cuda"))]
+    #[cfg(not(feature = "cuda"))]
     #[test]
     fn config_rejects_cuda_without_feature() {
         let error = validate_config(OnnxEvaluatorConfig {
