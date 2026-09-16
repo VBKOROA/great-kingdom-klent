@@ -1,11 +1,27 @@
-use std::borrow::Cow;
+//! Batched evaluation request containers shared by the ONNX and search layers.
 
-use pyo3::{prelude::*, types::PyBytes};
+use std::{borrow::Cow, fmt};
+
+use great_kingdom_engine::game::{ACTION_SPACE, BOARD_CELLS, GameState};
 use rayon::prelude::*;
 
-use crate::game::{ACTION_SPACE, BOARD_CELLS, FEATURE_CHANNELS, GameState};
+use crate::features::{FEATURE_CHANNELS, GameStateFeatures};
 
-#[pyclass]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeatureError {
+    InvalidInput(String),
+}
+
+impl fmt::Display for FeatureError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidInput(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for FeatureError {}
+
 #[derive(Clone, Debug)]
 pub struct EvalRequest {
     states: Vec<GameState>,
@@ -15,16 +31,14 @@ pub struct EvalRequest {
     game_indexes: Option<Vec<usize>>,
 }
 
-#[pymethods]
 impl EvalRequest {
-    #[staticmethod]
-    pub fn from_feature_rows(feature_rows: Vec<Vec<f32>>) -> PyResult<Self> {
+    pub fn from_feature_rows(feature_rows: Vec<Vec<f32>>) -> Result<Self, FeatureError> {
         let row_count = feature_rows.len();
         let expected_row = FEATURE_CHANNELS * BOARD_CELLS;
         let mut feature_values = Vec::with_capacity(row_count * expected_row);
         for row in feature_rows {
             if row.len() != expected_row {
-                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                return Err(FeatureError::InvalidInput(format!(
                     "expected feature row length {expected_row}, got {}",
                     row.len()
                 )));
@@ -34,15 +48,13 @@ impl EvalRequest {
         Ok(Self::from_feature_values(row_count, feature_values))
     }
 
-    #[staticmethod]
     pub fn from_feature_plane_bytes(
         row_count: usize,
-        feature_bytes: &Bound<'_, PyBytes>,
-    ) -> PyResult<Self> {
+        bytes: &[u8],
+    ) -> Result<Self, FeatureError> {
         let expected = row_count * FEATURE_CHANNELS * BOARD_CELLS * core::mem::size_of::<f32>();
-        let bytes = feature_bytes.as_bytes();
         if bytes.len() != expected {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            return Err(FeatureError::InvalidInput(format!(
                 "expected {expected} feature bytes for {row_count} rows, got {}",
                 bytes.len()
             )));
@@ -85,23 +97,23 @@ impl EvalRequest {
         }
         self.states
             .iter()
-            .map(GameState::feature_planes)
+            .map(GameStateFeatures::feature_planes)
             .collect::<Vec<_>>()
     }
 
     #[must_use]
-    pub fn feature_plane_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+    pub fn feature_plane_bytes(&self) -> Cow<'_, [u8]> {
         if let Some(feature_bytes) = &self.feature_bytes {
-            return PyBytes::new(py, feature_bytes);
+            return Cow::Borrowed(feature_bytes);
         }
         if let Some(feature_values) = &self.feature_values {
-            return PyBytes::new(py, f32_slice_as_bytes(feature_values));
+            return Cow::Borrowed(f32_slice_as_bytes(feature_values));
         }
         let mut features = Vec::with_capacity(self.states.len() * FEATURE_CHANNELS * BOARD_CELLS);
         for state in &self.states {
             features.extend(state.feature_planes());
         }
-        PyBytes::new(py, f32_slice_as_bytes(&features))
+        Cow::Owned(f32_values_as_bytes_owned(&features))
     }
 
     #[must_use]
@@ -113,15 +125,15 @@ impl EvalRequest {
     }
 
     #[must_use]
-    pub fn legal_mask_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+    pub fn legal_mask_bytes(&self) -> Cow<'_, [u8]> {
         if let Some(legal_mask_bytes) = &self.legal_mask_bytes {
-            return PyBytes::new(py, legal_mask_bytes);
+            return Cow::Borrowed(legal_mask_bytes);
         }
         let mut masks = Vec::with_capacity(self.states.len() * ACTION_SPACE);
         for state in &self.states {
             masks.extend(state.legal_mask().into_iter().map(u8::from));
         }
-        PyBytes::new(py, &masks)
+        Cow::Owned(masks)
     }
 
     #[must_use]
@@ -142,7 +154,7 @@ impl EvalRequest {
     }
 
     #[must_use]
-    pub(crate) fn feature_values_ref(&self) -> Cow<'_, [f32]> {
+    pub fn feature_values_ref(&self) -> Cow<'_, [f32]> {
         if let Some(feature_values) = &self.feature_values {
             return Cow::Borrowed(feature_values);
         }
@@ -159,27 +171,28 @@ impl EvalRequest {
         Cow::Owned(
             self.states
                 .iter()
-                .flat_map(GameState::feature_planes)
+                .flat_map(GameStateFeatures::feature_planes)
                 .collect(),
         )
     }
 
-    pub(crate) fn states(self) -> Vec<GameState> {
+    #[must_use]
+    pub fn states(self) -> Vec<GameState> {
         self.states
     }
 
     #[must_use]
-    pub(crate) fn new_with_precomputed_bytes(states: Vec<GameState>) -> Self {
+    pub fn new_with_precomputed_bytes(states: Vec<GameState>) -> Self {
         Self::new_with_options(states, None, true)
     }
 
     #[must_use]
-    pub(crate) fn new_with_precomputed_features(states: Vec<GameState>) -> Self {
+    pub fn new_with_precomputed_features(states: Vec<GameState>) -> Self {
         Self::new_with_options(states, None, false)
     }
 
     #[must_use]
-    pub(crate) fn new_with_game_indexes(states: Vec<GameState>, game_indexes: Vec<usize>) -> Self {
+    pub fn new_with_game_indexes(states: Vec<GameState>, game_indexes: Vec<usize>) -> Self {
         assert_eq!(
             states.len(),
             game_indexes.len(),
@@ -241,6 +254,10 @@ fn f32_slice_as_bytes(values: &[f32]) -> &[u8] {
     let byte_len = core::mem::size_of_val(values);
     let pointer = values.as_ptr().cast::<u8>();
     unsafe { core::slice::from_raw_parts(pointer, byte_len) }
+}
+
+fn f32_values_as_bytes_owned(values: &[f32]) -> Vec<u8> {
+    values.iter().flat_map(|value| value.to_ne_bytes()).collect()
 }
 
 #[cfg(test)]

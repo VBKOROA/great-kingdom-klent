@@ -157,6 +157,11 @@ impl GameState {
     }
 
     #[must_use]
+    pub fn board_cells(&self) -> &[Cell; BOARD_CELLS] {
+        &self.board
+    }
+
+    #[must_use]
     pub fn cell_at(&self, index: usize) -> Option<u8> {
         self.board.get(index).map(|cell| *cell as u8)
     }

@@ -1,9 +1,17 @@
-use crate::game::{
-    ACTION_SPACE, BOARD_CELLS, CASTLES_PER_PLAYER, Cell, FEATURE_CHANNELS, GameState, Player,
+//! Neural-network observation and feature engineering.
+//!
+//! Converts pure [`GameState`] values into fixed-channel observation planes and
+//! legal action masks used by the model and search layers. This crate has no
+//! ONNX Runtime or PyO3 dependency.
+
+use great_kingdom_engine::game::{
+    ACTION_SPACE, BOARD_CELLS, CASTLES_PER_PLAYER, Cell, GameState, Player,
 };
 
+pub const FEATURE_CHANNELS: usize = 11;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FeatureChannel {
+pub enum FeatureChannel {
     OwnCastle = 0,
     OpponentCastle = 1,
     NeutralCastle = 2,
@@ -17,9 +25,19 @@ enum FeatureChannel {
     PreviousMoveWasPass = 10,
 }
 
-impl GameState {
+pub trait GameStateFeatures {
     #[must_use]
-    pub(crate) fn legal_action_mask(&self) -> [bool; ACTION_SPACE] {
+    fn legal_action_mask(&self) -> [bool; ACTION_SPACE];
+
+    #[must_use]
+    fn feature_planes_array(&self) -> [f32; FEATURE_CHANNELS * BOARD_CELLS];
+
+    #[must_use]
+    fn feature_planes(&self) -> Vec<f32>;
+}
+
+impl GameStateFeatures for GameState {
+    fn legal_action_mask(&self) -> [bool; ACTION_SPACE] {
         let mut mask = [false; ACTION_SPACE];
         for action in self.legal_action_indexes() {
             mask[action] = true;
@@ -27,20 +45,19 @@ impl GameState {
         mask
     }
 
-    #[must_use]
-    pub(crate) fn feature_planes_array(&self) -> [f32; FEATURE_CHANNELS * BOARD_CELLS] {
+    fn feature_planes_array(&self) -> [f32; FEATURE_CHANNELS * BOARD_CELLS] {
         let mut planes = [0.0; FEATURE_CHANNELS * BOARD_CELLS];
         let player = self.current_player_value();
         let opponent = player.other();
         let own_remaining = remaining_castles(player, self);
         let opponent_remaining = remaining_castles(opponent, self);
         let current_player_is_blue = f32::from(player == Player::Blue);
-        let previous_move_was_pass = f32::from(self.previous_pass);
+        let previous_move_was_pass = f32::from(self.previous_pass());
         let territory_owners = self.territory_owners();
         let can_place = player.used_count(self) < CASTLES_PER_PLAYER;
 
         for (index, territory_owner) in territory_owners.iter().enumerate().take(BOARD_CELLS) {
-            match self.board[index] {
+            match self.board_cells()[index] {
                 cell if cell == player.cell() => {
                     set_channel(&mut planes, FeatureChannel::OwnCastle, index, 1.0);
                 }
@@ -62,7 +79,10 @@ impl GameState {
                 Cell::Blue | Cell::Orange => {}
             }
 
-            if can_place && self.board[index] == Cell::Empty && *territory_owner != Some(opponent) {
+            if can_place
+                && self.board_cells()[index] == Cell::Empty
+                && *territory_owner != Some(opponent)
+            {
                 set_channel(&mut planes, FeatureChannel::LegalPlace, index, 1.0);
             }
             set_channel(
@@ -93,6 +113,10 @@ impl GameState {
 
         planes
     }
+
+    fn feature_planes(&self) -> Vec<f32> {
+        self.feature_planes_array().to_vec()
+    }
 }
 
 fn remaining_castles(player: Player, state: &GameState) -> f32 {
@@ -111,7 +135,9 @@ fn set_channel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::{Action, BOARD_SIZE, CENTER_INDEX, state_with_board};
+    use great_kingdom_engine::game::{
+        Action, BOARD_SIZE, CENTER_INDEX, PASS_ACTION, state_with_board,
+    };
     use pretty_assertions::assert_eq;
 
     fn value(planes: &[f32], channel: FeatureChannel, index: usize) -> f32 {
@@ -137,7 +163,7 @@ mod tests {
             assert!(mask[action]);
         }
         assert!(!mask[CENTER_INDEX]);
-        assert!(mask[crate::game::PASS_ACTION]);
+        assert!(mask[PASS_ACTION]);
     }
 
     #[test]
@@ -180,7 +206,7 @@ mod tests {
             0.0
         );
         assert_eq!(value(&planes, FeatureChannel::PreviousMoveWasPass, 0), 1.0);
-        assert_eq!(state.legal_action_mask()[crate::game::PASS_ACTION], true);
+        assert!(state.legal_action_mask()[PASS_ACTION]);
     }
 
     #[test]
