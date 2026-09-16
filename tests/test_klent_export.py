@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -49,6 +51,85 @@ requires_core = pytest.mark.skipif(
     not _rust_core_available,
     reason="great_kingdom_core extension is not installed",
 )
+
+
+def test_submission_export_success_and_no_overwrite(tmp_path: Path) -> None:
+    from great_kingdom_ai.klent.submission_export import export_submission
+
+    checkpoint = _save_klent_checkpoint(tmp_path)
+    destination = tmp_path / "submission"
+    report = export_submission(checkpoint, destination, batch_sizes=(1, 3), seeds=(0,))
+    assert report["status"] == "passed"
+    assert (destination / "model.onnx").is_file()
+    assert not (destination / "model.pending.onnx").exists()
+    assert (destination / "source.pt").read_bytes() == checkpoint.read_bytes()
+    assert json.loads((destination / "export-report.json").read_text()) == report
+    assert len(report["parity_checks"]) == 2
+    with pytest.raises(FileExistsError):
+        export_submission(checkpoint, destination)
+
+
+def test_submission_export_collects_all_failures(tmp_path: Path, monkeypatch) -> None:
+    from great_kingdom_ai.klent import export as export_module
+    from great_kingdom_ai.klent.submission_export import main
+
+    checkpoint = _save_klent_checkpoint(tmp_path)
+    destination = tmp_path / "submission"
+    compare = export_module.compare_klent_checkpoint_to_onnx
+
+    def failing_compare(*args, **kwargs):
+        return replace(compare(*args, **kwargs), max_policy_abs_diff=1.0)
+
+    monkeypatch.setattr(export_module, "compare_klent_checkpoint_to_onnx", failing_compare)
+    assert (
+        main(
+            [
+                "--checkpoint",
+                str(checkpoint),
+                "--output-dir",
+                str(destination),
+                "--batch-sizes",
+                "1",
+                "3",
+                "--seeds",
+                "0",
+                "1",
+            ]
+        )
+        == 1
+    )
+    assert not (destination / "model.onnx").exists()
+    assert (destination / "model.pending.onnx").is_file()
+    report = json.loads((destination / "export-report.json").read_text())
+    assert report["status"] == "failed"
+    assert len(report["parity_checks"]) == 4
+    assert {(c["batch_size"], c["seed"]) for c in report["parity_checks"]} == {
+        (1, 0),
+        (1, 1),
+        (3, 0),
+        (3, 1),
+    }
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"tolerance": float("nan")},
+        {"tolerance": float("inf")},
+        {"tolerance": -1},
+        {"batch_sizes": ()},
+        {"batch_sizes": (0,)},
+        {"seeds": ()},
+        {"seeds": (-1,)},
+    ],
+)
+def test_submission_export_rejects_invalid_options(tmp_path: Path, options) -> None:
+    from great_kingdom_ai.klent.submission_export import export_submission
+
+    destination = tmp_path / "submission"
+    with pytest.raises(ValueError):
+        export_submission(tmp_path / "missing.pt", destination, **options)
+    assert not destination.exists()
 
 
 def _save_klent_checkpoint(tmp_path: Path, preset: str = "small_klent") -> Path:
@@ -224,6 +305,7 @@ def test_rust_onnx_evaluator_loads_exported_eval_model(tmp_path: Path) -> None:
 
     assert evaluator is not None
 
+
 @pytest.mark.skipif(
     importlib.util.find_spec("onnxconverter_common") is None,
     reason="onnxconverter-common is required for FP16 conversion",
@@ -231,7 +313,9 @@ def test_rust_onnx_evaluator_loads_exported_eval_model(tmp_path: Path) -> None:
 @pytest.mark.parametrize("kind", ["actor", "eval"])
 @pytest.mark.parametrize("preset", ["small_klent", "strong_attn_klent"])
 def test_fp16_klent_exports_load_and_match_fp32(
-    tmp_path: Path, kind: str, preset: str,
+    tmp_path: Path,
+    kind: str,
+    preset: str,
 ) -> None:
     """Catch Cast type conflicts and shared public-output consumers in ORT."""
     checkpoint = _save_klent_checkpoint(tmp_path, preset=preset)
@@ -279,9 +363,14 @@ def test_fp16_klent_exports_load_and_match_fp32(
                 play_rust_klent_zero_search,
             )
 
-            result = play_rust_klent_zero_search(RustKlentActorConfig(
-                actor_onnx_path=path, output_dir=tmp_path / "games",
-                games=2, rust_self_play_batch_size=2, max_turns=200,
-            ))
+            result = play_rust_klent_zero_search(
+                RustKlentActorConfig(
+                    actor_onnx_path=path,
+                    output_dir=tmp_path / "games",
+                    games=2,
+                    rust_self_play_batch_size=2,
+                    max_turns=200,
+                )
+            )
             assert result.games == 2
             assert result.transitions >= 2

@@ -24,82 +24,50 @@
 
 ## 2. 원본 고정 → export → 검증
 
-저장소 루트에서 설치된 venv를 활성화한다. Runpod에서는 `scripts/setup_runpod.sh`로
-준비한 환경을 사용한다. 아래 경로의 `klent-v1`은 제출 후보별로 새로운 이름을 지정한다.
-기존 후보를 덮어쓰지 않도록 이미 존재하는 디렉터리에서는 중단한다.
+저장소 루트에서 venv를 활성화하고 CLI를 실행한다. Runpod에서는
+`scripts/setup_runpod.sh`로 준비한 환경을 사용한다.
 
 ```bash
 source .venv/bin/activate
-python - <<'PY'
-import hashlib
-import json
-import subprocess
-from pathlib import Path
-
-import onnx
-import onnxruntime as ort
-import torch
-
-from great_kingdom_ai.klent.checkpoint import read_klent_checkpoint_metadata
-from great_kingdom_ai.klent.export import (
-    compare_klent_checkpoint_to_onnx,
-    export_klent_checkpoint_to_onnx,
-    onnx_output_names,
-)
-from great_kingdom_ai.replay.persistence import copy_file_atomic
-
-source = Path('data/runpod/klent-strong-attn/checkpoints/latest.pt')
-destination = Path('data/submissions/klent-v1')
-if not source.is_file():
-    raise FileNotFoundError(source)
-destination.mkdir(parents=True, exist_ok=False)
-checkpoint = destination / 'source.pt'
-copy_file_atomic(source, checkpoint)
-# 이후에는 고정한 복사본을 사용하므로 학습 중 latest.pt가 갱신돼도 비교 원본은 같다.
-candidate = destination / 'model.pending.onnx'
-export = export_klent_checkpoint_to_onnx(
-    checkpoint, candidate, kind='eval', device='cpu', precision='fp32',
-)
-onnx.checker.check_model(str(candidate))
-if onnx_output_names(candidate) != ['policy_logits', 'value']:
-    raise RuntimeError('Unexpected output contract')
-
-checks = []
-for batch_size in (1, 3, 8):
-    result = compare_klent_checkpoint_to_onnx(
-        checkpoint, candidate, kind='eval', batch_size=batch_size,
-    )
-    checks.append(result.to_json_dict())
-    if not result.passed:
-        raise RuntimeError(f'Parity failed: {result.to_json_dict()}')
-
-# 모든 검증에 성공했을 때만 최종 파일명을 사용한다.
-output = destination / 'model.onnx'
-candidate.replace(output)
-metadata = read_klent_checkpoint_metadata(checkpoint)
-report = {
-    'source': str(source), 'checkpoint': str(checkpoint),
-    'output': str(output), 'kind': export.kind, 'precision': export.precision,
-    'opset': export.opset_version, 'iteration': metadata.iteration,
-    'total_steps': metadata.total_steps, 'run_id': metadata.run_id,
-    'git_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
-    'torch': torch.__version__, 'onnx': onnx.__version__, 'onnxruntime': ort.__version__,
-    'checkpoint_sha256': hashlib.file_digest(checkpoint.open('rb'), 'sha256').hexdigest(),
-    'onnx_sha256': hashlib.file_digest(output.open('rb'), 'sha256').hexdigest(),
-    'parity_checks': checks,
-}
-(destination / 'export-report.json').write_text(json.dumps(report, indent=2) + '\n')
-print(json.dumps(report, indent=2))
-PY
+python -m great_kingdom_ai.klent.submission_export \
+  --checkpoint data/runpod/klent-strong-attn/checkpoints/latest.pt \
+  --output-dir data/submissions/klent-v2
 ```
 
-검증 실패 시 `model.onnx`는 생성되지 않는다. 원본·설정·오차를 확인한 뒤 새 후보 디렉터리에서
-다시 실행한다. parity 검사는 무작위 입력의 수치·형태 비교이므로 실제 대국 평가를 대신하지 않는다.
+패키지를 업데이트하여 설치했다면 `great-kingdom-klent-export` 명령으로도 동일하게 실행할 수 있다.
+`--output-dir`에는 매번 새로운 후보 디렉터리를 지정한다. 기존 디렉터리는 덮어쓰지 않는다.
+아래 예시의 `klent-v2`도 이미 존재한다면 새 이름을 사용한다.
+
+CLI는 원본을 `source.pt`로 고정한 뒤 CPU FP32 `kind="eval"`로 export하고,
+ONNX 구조·출력 이름과 PyTorch/ONNX Runtime의 출력 수치·형태를 검증한다.
+학습 중 `latest.pt`가 갱신되어도 모든 검증은 고정한 복사본을 사용한다.
+
+기본 검증은 batch `1, 3, 8` × seed `0, 1, 2`의 9개 조합이며,
+policy/value 최대 절대오차 허용치는 `1e-4`다. 이는 제출 CLI의 기본값이며
+기존 학습·공개 코드의 parity 기본값은 변경하지 않는다. Runpod에서 관측한
+FP32 policy 로짓 오차 약 `4e-5`를 고려한 값으로, 모든 모델의 정확성을 보장하는 기준은 아니다.
+다음 옵션으로 검증 범위를 조정할 수 있다.
+
+```bash
+python -m great_kingdom_ai.klent.submission_export \
+  --checkpoint data/submissions/klent-v2/source.pt \
+  --output-dir data/submissions/klent-v3 \
+  --tolerance 1e-4 --batch-sizes 1 3 8 --seeds 0 1 2
+```
+
+실패한 후보의 모델을 그대로 다시 export하려면 위처럼 해당 `source.pt`를 지정한다.
+`latest.pt`를 다시 지정하면 학습이 진행된 다른 모델일 수 있다.
+
+parity 실패 시에도 나머지 조합을 모두 검사하고 종료 코드 1을 반환한다.
+`source.pt`, `model.pending.onnx`, 실패 결과를 포함한 `export-report.json`을 보관하며
+`model.onnx`로 승격하지 않는다. export 자체가 실패했다면 pending 파일은 없거나 불완전할 수 있다.
+보고서에는 batch/seed별 오차·허용치, iteration, run ID, 파일 해시, 라이브러리 버전을 기록한다.
+parity 검사는 무작위 입력의 수치·형태 비교이므로 실제 대국 평가를 대신하지 않는다.
 
 성공 시:
 
 ```text
-data/submissions/klent-v1/
+data/submissions/klent-v2/
 ├── model.onnx          # Gumbel 엔진에 전달할 FP32 모델
 ├── source.pt           # 동일 모델의 재export·추적용 원본
 └── export-report.json  # iteration, run ID, 해시, 라이브러리 버전, parity 결과
@@ -119,7 +87,7 @@ import math
 import great_kingdom_core as core
 
 evaluator = core.OnnxEvaluator(
-    'data/submissions/klent-v1/model.onnx', device='cpu', max_batch_size=8,
+    'data/submissions/klent-v2/model.onnx', device='cpu', max_batch_size=8,
 )
 request = core.EvalRequest.from_feature_rows([core.GameState().feature_planes()])
 logits, values = evaluator.evaluate(request)
