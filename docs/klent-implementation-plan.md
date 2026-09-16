@@ -89,7 +89,7 @@ flowchart TD
 
 ### (3) Gumbel MCTS 평가용 ONNX Export ([`onnx_export.py`](../python/great_kingdom_ai/onnx_export.py))
 - **핵심 아이디어**:
-  - Rust의 [`OnnxEvaluator`](../rust/great_kingdom_core/src/onnx/evaluator.rs)와 [`GumbelSearch`](../rust/great_kingdom_core/src/gumbel/search.rs)는 ONNX의 `"policy_logits"`와 `"value"` 텐서를 읽습니다.
+  - Rust의 [`OnnxEvaluator`](../rust/crates/great_kingdom_onnx/src/evaluator.rs)와 [`GumbelSearch`](../rust/crates/great_kingdom_gumbel/src/search.rs)는 ONNX의 `"policy_logits"`와 `"value"` 텐서를 읽습니다.
   - Export 시 모델 끝단에 **legal action만 마스킹한** $V(s) = \langle \text{softmax}(\pi_{\text{mask}}), Q \rangle$ 노드를 그래프에 결합하는 `KlentGumbelExportWrapper`를 둡니다. 불법수 Q/로짓은 학습되지 않으므로 반드시 마스킹해야 합니다.
   ```python
   from great_kingdom_ai.klent.targets import legal_mask_from_features, masked_state_value
