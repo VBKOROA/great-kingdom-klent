@@ -1,0 +1,14 @@
+[package]
+name = "great_kingdom_features"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "great_kingdom_features"
+
+[dependencies]
+great_kingdom_engine = { path = "../great_kingdom_engine" }
+rayon.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true

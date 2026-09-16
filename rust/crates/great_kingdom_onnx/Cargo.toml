@@ -1,0 +1,20 @@
+[package]
+name = "great_kingdom_onnx"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "great_kingdom_onnx"
+
+[features]
+default = []
+cuda = ["ort/cuda"]
+
+[dependencies]
+great_kingdom_engine = { path = "../great_kingdom_engine" }
+great_kingdom_features = { path = "../great_kingdom_features" }
+ort.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true

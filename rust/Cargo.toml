@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/great_kingdom_engine",
+    "crates/great_kingdom_features",
+    "crates/great_kingdom_onnx",
+    "crates/great_kingdom_gumbel",
+    "crates/great_kingdom_klent",
+    "great_kingdom_core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+pretty_assertions = "1.4"
+pyo3 = { version = "0.25" }
+rayon = "1.12.0"
+ort = { version = "=2.0.0-rc.10", default-features = false, features = [
+    "copy-dylibs",
+    "download-binaries",
+    "ndarray",
+    "std",
+] }
