@@ -48,10 +48,7 @@ impl EvalRequest {
         Ok(Self::from_feature_values(row_count, feature_values))
     }
 
-    pub fn from_feature_plane_bytes(
-        row_count: usize,
-        bytes: &[u8],
-    ) -> Result<Self, FeatureError> {
+    pub fn from_feature_plane_bytes(row_count: usize, bytes: &[u8]) -> Result<Self, FeatureError> {
         let expected = row_count * FEATURE_CHANNELS * BOARD_CELLS * core::mem::size_of::<f32>();
         if bytes.len() != expected {
             return Err(FeatureError::InvalidInput(format!(
@@ -257,7 +254,10 @@ fn f32_slice_as_bytes(values: &[f32]) -> &[u8] {
 }
 
 fn f32_values_as_bytes_owned(values: &[f32]) -> Vec<u8> {
-    values.iter().flat_map(|value| value.to_ne_bytes()).collect()
+    values
+        .iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect()
 }
 
 #[cfg(test)]

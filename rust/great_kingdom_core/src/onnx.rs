@@ -3,9 +3,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use great_kingdom_onnx::{
-    OnnxEvaluator as CoreOnnxEvaluator, OnnxEvaluatorConfig, parse_device,
-};
+use great_kingdom_onnx::{OnnxEvaluator as CoreOnnxEvaluator, OnnxEvaluatorConfig, parse_device};
 
 use crate::errors::onnx_error_to_runtime;
 use crate::eval_request::EvalRequest;

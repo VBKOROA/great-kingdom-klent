@@ -240,7 +240,11 @@ fn validate_policy_len(row: &[f32], name: &str) -> Result<(), GumbelError> {
     Ok(())
 }
 
-fn validate_legal_values(legal_actions: &[usize], row: &[f32], name: &str) -> Result<(), GumbelError> {
+fn validate_legal_values(
+    legal_actions: &[usize],
+    row: &[f32],
+    name: &str,
+) -> Result<(), GumbelError> {
     if legal_actions.iter().any(|action| !row[*action].is_finite()) {
         return Err(GumbelError::message(format!(
             "{name} values for legal actions must be finite"

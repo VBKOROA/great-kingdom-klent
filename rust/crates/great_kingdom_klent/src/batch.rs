@@ -47,7 +47,9 @@ impl KlentZeroSearchBatch {
     ) -> Result<Self, KlentError> {
         validate_klent_coefficients(alpha, beta)?;
         if games == 0 {
-            return Err(KlentError::InvalidInput("games must be positive".to_string()));
+            return Err(KlentError::InvalidInput(
+                "games must be positive".to_string(),
+            ));
         }
         if max_batch_size == 0 {
             return Err(KlentError::InvalidInput(

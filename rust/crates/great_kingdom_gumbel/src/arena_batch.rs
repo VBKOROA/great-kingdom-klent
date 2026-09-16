@@ -157,7 +157,6 @@ impl GumbelArenaBatch {
             .collect()
     }
 
-
     pub fn search_active_with_onnx_evaluators(
         &mut self,
         candidate_evaluator: &mut OnnxEvaluator,
@@ -173,11 +172,8 @@ impl GumbelArenaBatch {
             .map(|index| self.states[*index].clone())
             .collect::<Vec<_>>();
         let candidate_players = self.candidate_players.clone();
-        let mut evaluator = OnnxArenaLeafEvaluator::new(
-            candidate_evaluator,
-            best_evaluator,
-            candidate_players,
-        );
+        let mut evaluator =
+            OnnxArenaLeafEvaluator::new(candidate_evaluator, best_evaluator, candidate_players);
         let root_eval = evaluator.evaluate(
             active_states,
             active_indexes.clone(),
@@ -204,7 +200,10 @@ impl GumbelArenaBatch {
         Ok((results, root_policy_logits))
     }
 
-    pub fn apply_actions(&mut self, actions: Vec<Option<usize>>) -> Result<Vec<Option<u8>>, GumbelError> {
+    pub fn apply_actions(
+        &mut self,
+        actions: Vec<Option<usize>>,
+    ) -> Result<Vec<Option<u8>>, GumbelError> {
         if actions.len() != self.states.len() {
             return Err(GumbelError::message(format!(
                 "expected {} action slots, got {}",

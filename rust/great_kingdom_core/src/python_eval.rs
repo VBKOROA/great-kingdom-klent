@@ -31,7 +31,8 @@ impl GumbelEvaluator for PythonGumbelEvaluator<'_, '_> {
 
     fn evaluate(&mut self, request: CoreEvalRequest) -> Result<GumbelEvalBatch, GumbelError> {
         let py = self.callback.py();
-        let request = Py::new(py, EvalRequest::from_inner(request)).map_err(GumbelError::external)?;
+        let request =
+            Py::new(py, EvalRequest::from_inner(request)).map_err(GumbelError::external)?;
         let response = self
             .callback
             .call1((request,))
@@ -67,7 +68,8 @@ impl ArenaLeafEvaluator for PythonArenaLeafEvaluator<'_, '_> {
     ) -> Result<GumbelEvalBatch, GumbelError> {
         let request = CoreEvalRequest::new_with_game_indexes(states, game_indexes);
         let py = self.callback.py();
-        let request = Py::new(py, EvalRequest::from_inner(request)).map_err(GumbelError::external)?;
+        let request =
+            Py::new(py, EvalRequest::from_inner(request)).map_err(GumbelError::external)?;
         let response = self
             .callback
             .call1((request,))
@@ -76,9 +78,7 @@ impl ArenaLeafEvaluator for PythonArenaLeafEvaluator<'_, '_> {
     }
 }
 
-pub(crate) fn parse_gumbel_eval_response(
-    response: &Bound<'_, PyAny>,
-) -> PyResult<GumbelEvalBatch> {
+pub(crate) fn parse_gumbel_eval_response(response: &Bound<'_, PyAny>) -> PyResult<GumbelEvalBatch> {
     if let Ok((policy_obj, value_obj)) = response.extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>()
     {
         if let Ok(eval) = parse_gumbel_eval_response_buffers(&policy_obj, &value_obj) {

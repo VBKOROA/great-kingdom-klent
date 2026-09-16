@@ -4,8 +4,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use great_kingdom_klent::{
-    KlentZeroSearchBatch as CoreKlentZeroSearchBatch, analytical_policy_row,
-    masked_state_value_row,
+    KlentZeroSearchBatch as CoreKlentZeroSearchBatch, analytical_policy_row, masked_state_value_row,
 };
 
 use crate::errors::klent_error_to_pyerr;

@@ -3,7 +3,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-
 use super::{
     config::GumbelConfig,
     node::GumbelNode,
@@ -882,7 +881,6 @@ pub(crate) fn unreserve_path(nodes: &mut [GumbelNode], path: &[(usize, usize)]) 
 fn value_for_player(outcome: GameOutcome, player: Player) -> f32 {
     if outcome.winner == player { 1.0 } else { -1.0 }
 }
-
 
 #[cfg(test)]
 mod tests {

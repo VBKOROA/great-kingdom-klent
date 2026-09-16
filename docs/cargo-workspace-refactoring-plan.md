@@ -323,3 +323,35 @@ python -m maturin develop --release --features extension-module,onnx-cuda
 1. **CPU Smoke Test**: Run [`scripts/run_klent_smoke.py`](../scripts/run_klent_smoke.py) on office laptop.
 2. **GPU CUDA Parity Test**: Run RunPod smoke test and verify `KlentZeroSearchBatch` and `GumbelArenaBatch` with CUDA inference.
 3. **Arena Sanity Test**: Verify head-to-head evaluation via `great-kingdom-evaluate`.
+
+---
+
+## 7. Implementation Notes & Sign-Off
+
+**Status: Implemented** on branch `refactor/rust-architecture`.
+
+### 7.1 Actual Layout
+The PyO3 facade crate is kept at `rust/great_kingdom_core` (not `rust/crates/great_kingdom_core`) so
+that [`scripts/setup_runpod.sh`](../scripts/setup_runpod.sh) continues to work **unmodified**
+(`RUST_CRATE_DIR="$ROOT_DIR/rust/great_kingdom_core"`). The five domain crates live under `rust/crates/`.
+
+### 7.2 Corrections to this Plan
+- The observation tensor has **11** channels (`FEATURE_CHANNELS = 11`), not 17. Feature planes are
+  `11 x 9 x 9`. The channel layout from the original implementation is preserved exactly.
+- `great_kingdom_features` owns the observation projection through the `GameStateFeatures` extension
+  trait (inherent `impl GameState` blocks cannot cross crate boundaries) plus `EvalRequest`.
+- Domain crates return pure error types (`FeatureError`, `OnnxError`, `GumbelError`, `KlentError`).
+  The facade maps them to Python exceptions: input/configuration problems become `ValueError`,
+  runtime failures become `RuntimeError`, and Python exceptions raised inside user evaluator
+  callbacks are re-raised with their original traceback (via `GumbelError::External` downcasting).
+- The Python-facing `GameState`/`EvalRequest`/`OnnxEvaluator`/Gumbel/KLENT classes are thin
+  `#[pyclass]` wrappers in the facade around the pure domain types.
+
+### 7.3 Verification
+- `cargo test --workspace`: **105 passed** (engine 25, features 7, onnx 13, gumbel 53, klent 7).
+- `cargo check -p great_kingdom_core --features onnx-cuda`: passes (CUDA feature wiring intact).
+- `maturin develop --release --features extension-module` + `pytest`: **369 passed**.
+- `python -m scripts.run_klent_smoke`: CPU smoke completes and trains one iteration.
+- Engine unit tests compile and run in <0.1s with no ONNX Runtime or PyO3 dependency.
+- GPU CUDA parity (`KlentZeroSearchBatch`, `GumbelArenaBatch`) still needs to be confirmed on RunPod;
+  it cannot be exercised on the GPU-less office laptop.

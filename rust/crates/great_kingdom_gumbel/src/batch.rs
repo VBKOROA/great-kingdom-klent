@@ -180,7 +180,6 @@ impl GumbelSelfPlayBatch {
         self.search_active(policy_logits, true)
     }
 
-
     pub fn search_active_with_onnx_evaluator(
         &mut self,
         evaluator: &mut OnnxEvaluator,
@@ -320,8 +319,7 @@ impl GumbelSelfPlayBatch {
             .into_iter()
             .map(Vec::from)
             .collect::<Vec<_>>();
-        let mut adapter =
-            OnnxRawEmaGumbelEvaluator::new(raw_evaluator, ema_evaluator, raw_players);
+        let mut adapter = OnnxRawEmaGumbelEvaluator::new(raw_evaluator, ema_evaluator, raw_players);
         let results = self.search_active_with_evaluator(
             root_rows,
             true,
@@ -375,8 +373,7 @@ impl GumbelSelfPlayBatch {
             .into_iter()
             .map(Vec::from)
             .collect::<Vec<_>>();
-        let mut adapter =
-            OnnxRawEmaGumbelEvaluator::new(raw_evaluator, ema_evaluator, raw_players);
+        let mut adapter = OnnxRawEmaGumbelEvaluator::new(raw_evaluator, ema_evaluator, raw_players);
         let results = self.search_active_with_evaluator(
             root_rows,
             true,
@@ -394,8 +391,10 @@ impl GumbelSelfPlayBatch {
         self.search_active(priors, false)
     }
 
-
-    pub fn apply_actions(&mut self, actions: Vec<Option<usize>>) -> Result<Vec<Option<u8>>, GumbelError> {
+    pub fn apply_actions(
+        &mut self,
+        actions: Vec<Option<usize>>,
+    ) -> Result<Vec<Option<u8>>, GumbelError> {
         if actions.len() != self.states.len() {
             return Err(GumbelError::message(format!(
                 "expected {} action slots, got {}",

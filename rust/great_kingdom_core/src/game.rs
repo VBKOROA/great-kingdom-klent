@@ -3,9 +3,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use great_kingdom_engine::game::{
-    Action, BOARD_SIZE, GameState as CoreGameState,
-};
+use great_kingdom_engine::game::{Action, BOARD_SIZE, GameState as CoreGameState};
 use great_kingdom_features::{FEATURE_CHANNELS, GameStateFeatures};
 
 #[pyclass]

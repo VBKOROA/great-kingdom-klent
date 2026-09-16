@@ -3,7 +3,6 @@
 use great_kingdom_engine::game::ACTION_SPACE;
 use great_kingdom_onnx::OnnxError;
 
-
 pub fn analytical_policy_row(
     policy_logits: &[f32],
     q_values: &[f32],

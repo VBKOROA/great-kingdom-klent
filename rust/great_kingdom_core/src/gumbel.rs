@@ -5,8 +5,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
 use great_kingdom_gumbel::{
-    GumbelArenaBatch as CoreArenaBatch, GumbelConfig as CoreConfig,
-    GumbelEvaluator as _, GumbelResult as CoreResult, GumbelSearch as CoreSearch,
+    GumbelArenaBatch as CoreArenaBatch, GumbelConfig as CoreConfig, GumbelEvaluator as _,
+    GumbelResult as CoreResult, GumbelSearch as CoreSearch,
     GumbelSelfPlayBatch as CoreSelfPlayBatch,
 };
 
@@ -585,7 +585,10 @@ impl GumbelSelfPlayBatch {
         leaf_batch_size: usize,
     ) -> PyResult<(Vec<Option<GumbelResult>>, Vec<Vec<f32>>)> {
         self.inner
-            .search_active_with_onnx_evaluator_and_root_logits(&mut evaluator.inner, leaf_batch_size)
+            .search_active_with_onnx_evaluator_and_root_logits(
+                &mut evaluator.inner,
+                leaf_batch_size,
+            )
             .map(map_results_with_root_logits)
             .map_err(gumbel_error_to_pyerr)
     }
