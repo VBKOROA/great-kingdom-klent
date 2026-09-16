@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "great-kingdom-ai"
+version = "0.1.0"
+description = "AlphaZero-lite AI experiments for the Great Kingdom board game."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=2.0",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+ai = [
+  "onnx>=1.17",
+  "onnxconverter-common>=1.14",
+  "torch>=2.6",
+]
+dev = [
+  "maturin>=1.8",
+  "mypy>=1.13",
+  "onnxruntime>=1.20",
+  "pytest>=8.3",
+  "ruff>=0.8",
+]
+
+[project.scripts]
+great-kingdom-play = "great_kingdom_ai.cli:main"
+great-kingdom-evaluate = "great_kingdom_ai.evaluate:main"
+great-kingdom-export-onnx = "great_kingdom_ai.onnx_export:main"
+great-kingdom-klent = "great_kingdom_ai.klent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["python"]
+
+[tool.setuptools.package-data]
+great_kingdom_ai = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["python"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["great_kingdom_ai"]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["onnxconverter_common", "onnxconverter_common.*"]
+ignore_missing_imports = true

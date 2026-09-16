@@ -1,0 +1,436 @@
+import importlib.util
+
+import pytest
+
+
+def target_scale_kwargs() -> dict[str, float]:
+    return {"policy_target_c_visit": 5.0, "policy_target_c_scale": 0.25}
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("great_kingdom_core") is None,
+    reason="great_kingdom_core extension is not installed",
+)
+def test_gumbel_search_constructor_exposes_config() -> None:
+    import great_kingdom_core as core  # type: ignore[import-untyped]
+
+    assert core.rayon_thread_count() >= 1
+
+    probe = core.GumbelSearch(**target_scale_kwargs())
+    if not hasattr(probe, "gumbel_scale"):
+        pytest.skip("installed great_kingdom_core does not expose gumbel_scale")
+
+    search = core.GumbelSearch(
+        simulations=32,
+        max_considered_actions=8,
+        c_visit=25.0,
+        c_scale=1.5,
+        gumbel_scale=0.0,
+        seed=123,
+        policy_target_temperature=2.0,
+        policy_target_c_visit=5.0,
+        policy_target_c_scale=0.25,
+    )
+
+    assert search.simulations() == 32
+    assert search.max_considered_actions() == 8
+    assert search.c_visit() == 25.0
+    assert search.c_scale() == 1.5
+    assert search.gumbel_scale() == 0.0
+    assert search.policy_target_c_visit() == 5.0
+    assert search.policy_target_c_scale() == 0.25
+    assert search.policy_target_temperature() == 2.0
+    assert search.seed() == 123
+
+    if not hasattr(search, "set_max_considered_actions"):
+        pytest.skip("installed great_kingdom_core does not expose set_max_considered_actions")
+    search.set_max_considered_actions(4)
+    assert search.max_considered_actions() == 4
+    search.set_gumbel_scale(1.0)
+    assert search.gumbel_scale() == 1.0
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("great_kingdom_core") is None,
+    reason="great_kingdom_core extension is not installed",
+)
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"simulations": 0}, "simulations"),
+        ({"max_considered_actions": 0}, "max_considered_actions"),
+        ({"c_visit": 0.0}, "c_visit"),
+        ({"c_scale": -1.0}, "c_scale"),
+        ({"gumbel_scale": -1.0}, "gumbel_scale"),
+        ({"policy_target_c_visit": 0.0}, "policy_target_c_visit"),
+        ({"policy_target_c_scale": -1.0}, "policy_target_c_scale"),
+        ({"policy_target_temperature": 0.0}, "policy_target_temperature"),
+    ],
+)
+def test_gumbel_search_rejects_invalid_config(
+    kwargs: dict[str, object],
+    match: str,
+) -> None:
+    import great_kingdom_core as core  # type: ignore[import-untyped]
+
+    if "gumbel_scale" in kwargs and not hasattr(
+        core.GumbelSearch(**target_scale_kwargs()), "gumbel_scale"
+    ):
+        pytest.skip("installed great_kingdom_core does not expose gumbel_scale")
+
+    with pytest.raises(ValueError, match=match):
+        core.GumbelSearch(**{**target_scale_kwargs(), **kwargs})
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("great_kingdom_core") is None,
+    reason="great_kingdom_core extension is not installed",
+)
+def test_gumbel_search_requires_policy_target_scale() -> None:
+    import great_kingdom_core as core  # type: ignore[import-untyped]
+
+    with pytest.raises(ValueError, match="policy_target_c_visit"):
+        core.GumbelSearch(policy_target_c_scale=0.25)
+
+    with pytest.raises(ValueError, match="policy_target_c_scale"):
+        core.GumbelSearch(policy_target_c_visit=5.0)
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("great_kingdom_core") is None,
+    reason="great_kingdom_core extension is not installed",
+)
+def test_gumbel_result_shape_from_logits_skeleton() -> None:
+    import great_kingdom_core as core  # type: ignore[import-untyped]
+
+    state = core.GameState()
+    search = core.GumbelSearch(
+        simulations=4,
+        max_considered_actions=2,
+        seed=7,
+        **target_scale_kwargs(),
+    )
+    logits = [0.0] * core.action_space()
+    logits[0] = 20.0
+
+    result = search.search_with_logits(state, logits)
+
+    assert result.selected_action() == 0
+    assert len(result.policy_target()) == core.action_space()
+    assert len(result.visit_counts()) == core.action_space()
+    assert sum(result.policy_target()) == pytest.approx(1.0)
+    assert result.policy_target()[40] == 0.0
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("great_kingdom_core") is None,
+    reason="great_kingdom_core extension is not installed",
+)
+def test_gumbel_self_play_batch_constructor_and_active_request() -> None:
+    import great_kingdom_core as core  # type: ignore[import-untyped]
+
+    batch = core.GumbelSelfPlayBatch(
+        game_count=2,
+        simulations=4,
+        seed=99,
+        **target_scale_kwargs(),
+    )
+
+    assert batch.len() == 2
+    assert batch.active_count() == 2
+    request = batch.active_eval_request()
+    assert request.len() == 2
+    assert list(request.game_indexes()) == []
+    assert list(batch.current_players()) == [1, 1]
+    if hasattr(batch, "feature_rows_for_game_indexes"):
+        rows = batch.feature_rows_for_game_indexes([1, 0])
+        assert len(rows) == 2
+        assert len(rows[0]) == core.FEATURE_CHANNELS * core.BOARD_CELLS
+
+    if not hasattr(batch, "set_max_considered_actions"):
+        pytest.skip("installed great_kingdom_core does not expose set_max_considered_actions")
+    batch.set_max_considered_actions([4, None])
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("great_kingdom_core") is None,
+    reason="great_kingdom_core extension is not installed",
+)
+def test_gumbel_self_play_batch_can_reconstruct_from_action_histories() -> None:
+    import great_kingdom_core as core  # type: ignore[import-untyped]
+
+    if not hasattr(core.GumbelSelfPlayBatch, "from_action_histories"):
+        pytest.skip("installed great_kingdom_core does not expose from_action_histories")
+
+    batch = core.GumbelSelfPlayBatch.from_action_histories(
+        [[], [0], [0, 1]],
+        simulations=4,
+        seed=99,
+        **target_scale_kwargs(),
+    )
+
+    assert batch.len() == 3
+    assert batch.active_count() == 3
+    assert list(batch.current_players()) == [1, 2, 1]
+
+    with pytest.raises(ValueError, match="invalid action index"):
+        core.GumbelSelfPlayBatch.from_action_histories(
+            [[core.action_space() + 1]],
+            simulations=4,
+            **target_scale_kwargs(),
+        )
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("great_kingdom_core") is None,
+    reason="great_kingdom_core extension is not installed",
+)
+def test_gumbel_arena_batch_constructor_and_basic_state_methods() -> None:
+    import great_kingdom_core as core  # type: ignore[import-untyped]
+
+    batch = core.GumbelArenaBatch(
+        game_count=3,
+        seed_start=10,
+        game_index_start=1,
+        simulations=4,
+        max_considered_actions=2,
+        seed=7,
+        **target_scale_kwargs(),
+    )
+
+    request = batch.active_eval_request()
+    assert batch.len() == 3
+    assert batch.active_count() == 3
+    assert list(batch.active_game_indexes()) == [0, 1, 2]
+    assert list(request.game_indexes()) == [0, 1, 2]
+    assert list(batch.current_players()) == [1, 1, 1]
+    assert list(batch.candidate_players()) == [2, 1, 2]
+    assert list(batch.seeds()) == [10, 11, 12]
+    assert list(batch.winners()) == [None, None, None]
+    assert list(batch.end_reasons()) == [None, None, None]
+    assert list(batch.territory_scores()) == [(0, 0), (0, 0), (0, 0)]
+
+    assert list(batch.apply_actions([0, None, None])) == [None, None, None]
+    assert list(batch.current_players()) == [2, 1, 1]
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("great_kingdom_core") is None,
+    reason="great_kingdom_core extension is not installed",
+)
+def test_gumbel_arena_batch_active_request_excludes_terminal_games() -> None:
+    import great_kingdom_core as core  # type: ignore[import-untyped]
+
+    batch = core.GumbelArenaBatch(
+        game_count=2,
+        simulations=4,
+        max_considered_actions=2,
+        **target_scale_kwargs(),
+    )
+
+    assert list(batch.apply_actions([81, None])) == [None, None]
+    assert list(batch.apply_actions([81, None])) == [2, None]
+
+    request = batch.active_eval_request()
+    assert list(batch.is_terminal()) == [True, False]
+    assert list(batch.active_game_indexes()) == [1]
+    assert request.len() == 1
+    assert list(request.game_indexes()) == [1]
+    assert list(request.current_players()) == [1]
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("great_kingdom_core") is None,
+    reason="great_kingdom_core extension is not installed",
+)
+def test_gumbel_arena_batch_search_rejects_mismatched_batches() -> None:
+    import great_kingdom_core as core  # type: ignore[import-untyped]
+
+    def evaluator(request: object) -> tuple[list[list[float]], list[float]]:
+        request_len = request.len()  # type: ignore[attr-defined]
+        return [[0.0] * core.action_space() for _ in range(request_len)], [0.0] * request_len
+
+    batch = core.GumbelArenaBatch(
+        game_count=2,
+        simulations=4,
+        max_considered_actions=2,
+        **target_scale_kwargs(),
+    )
+
+    with pytest.raises(ValueError, match="expected 2 policy rows"):
+        batch.search_active_with_logits_and_evaluator(
+            [[0.0] * core.action_space()],
+            evaluator,
+            root_values=[0.0, 0.0],
+        )
+
+    with pytest.raises(ValueError, match="expected 2 root values"):
+        batch.search_active_with_logits_and_evaluator(
+            [[0.0] * core.action_space(), [0.0] * core.action_space()],
+            evaluator,
+            root_values=[0.0],
+        )
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("great_kingdom_core") is None,
+    reason="great_kingdom_core extension is not installed",
+)
+def test_gumbel_arena_batch_search_returns_none_for_terminal_slots() -> None:
+    import great_kingdom_core as core  # type: ignore[import-untyped]
+
+    def evaluator(request: object) -> tuple[list[list[float]], list[float]]:
+        request_len = request.len()  # type: ignore[attr-defined]
+        rows = []
+        for _ in range(request_len):
+            logits = [-3.0] * core.action_space()
+            logits[0] = 4.0
+            rows.append(logits)
+        return rows, [0.0] * request_len
+
+    batch = core.GumbelArenaBatch(
+        game_count=2,
+        simulations=4,
+        max_considered_actions=2,
+        **target_scale_kwargs(),
+    )
+    batch.apply_actions([81, None])
+    batch.apply_actions([81, None])
+
+    results = batch.search_active_with_logits_and_evaluator(
+        [[0.0] * core.action_space()],
+        evaluator,
+        root_values=[0.0],
+        leaf_batch_size=4,
+    )
+
+    assert len(results) == 2
+    assert results[0] is None
+    assert results[1] is not None
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("great_kingdom_core") is None,
+    reason="great_kingdom_core extension is not installed",
+)
+def test_gumbel_arena_batch_batches_leaf_eval_with_game_metadata() -> None:
+    import great_kingdom_core as core  # type: ignore[import-untyped]
+
+    request_lengths: list[int] = []
+    requested_game_indexes: list[list[int]] = []
+
+    def evaluator(request: object) -> tuple[list[list[float]], list[float]]:
+        request_len = request.len()  # type: ignore[attr-defined]
+        request_lengths.append(request_len)
+        requested_game_indexes.append(list(request.game_indexes()))  # type: ignore[attr-defined]
+        rows = []
+        for _ in range(request_len):
+            logits = [-3.0] * core.action_space()
+            logits[0] = 4.0
+            logits[1] = 2.0
+            rows.append(logits)
+        return rows, [0.0] * request_len
+
+    batch = core.GumbelArenaBatch(
+        game_count=2,
+        simulations=4,
+        max_considered_actions=2,
+        seed=7,
+        **target_scale_kwargs(),
+    )
+    root_logits = [[0.0] * core.action_space() for _ in range(2)]
+
+    results = batch.search_active_with_logits_and_evaluator(
+        root_logits,
+        evaluator,
+        root_values=[0.0, 0.0],
+        leaf_batch_size=4,
+    )
+
+    assert max(request_lengths) >= 2
+    assert all(
+        len(game_indexes) == request_len
+        for game_indexes, request_len in zip(requested_game_indexes, request_lengths, strict=True)
+    )
+    assert {game_index for row in requested_game_indexes for game_index in row} == {0, 1}
+    assert [sum(result.visit_counts()) for result in results if result is not None] == [4, 4]
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("great_kingdom_core") is None,
+    reason="great_kingdom_core extension is not installed",
+)
+def test_gumbel_search_with_evaluator_batches_leaf_logits() -> None:
+    import great_kingdom_core as core  # type: ignore[import-untyped]
+
+    request_lengths: list[int] = []
+
+    def evaluator(request: object) -> tuple[list[list[float]], list[float]]:
+        request_len = request.len()  # type: ignore[attr-defined]
+        request_lengths.append(request_len)
+        rows = []
+        for _ in range(request_len):
+            logits = [-3.0] * core.action_space()
+            logits[0] = 4.0
+            logits[1] = 2.0
+            rows.append(logits)
+        return rows, [0.25] * request_len
+
+    state = core.GameState()
+    search = core.GumbelSearch(
+        simulations=6,
+        max_considered_actions=4,
+        seed=7,
+        **target_scale_kwargs(),
+    )
+    root_logits = [0.0] * core.action_space()
+
+    result = search.search_with_logits_and_evaluator(
+        state,
+        root_logits,
+        evaluator,
+        root_value=0.0,
+        leaf_batch_size=4,
+    )
+
+    assert max(request_lengths) > 1
+    assert sum(result.visit_counts()) == 6
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("great_kingdom_core") is None,
+    reason="great_kingdom_core extension is not installed",
+)
+def test_gumbel_self_play_batch_batches_active_game_leaf_eval() -> None:
+    import great_kingdom_core as core  # type: ignore[import-untyped]
+
+    request_lengths: list[int] = []
+
+    def evaluator(request: object) -> tuple[list[list[float]], list[float]]:
+        request_len = request.len()  # type: ignore[attr-defined]
+        request_lengths.append(request_len)
+        rows = []
+        for _ in range(request_len):
+            logits = [-3.0] * core.action_space()
+            logits[0] = 4.0
+            rows.append(logits)
+        return rows, [0.0] * request_len
+
+    batch = core.GumbelSelfPlayBatch(
+        game_count=2,
+        simulations=4,
+        max_considered_actions=2,
+        seed=7,
+        **target_scale_kwargs(),
+    )
+    root_logits = [[0.0] * core.action_space() for _ in range(2)]
+
+    results = batch.search_active_with_logits_and_evaluator(
+        root_logits,
+        evaluator,
+        root_values=[0.0, 0.0],
+        leaf_batch_size=4,
+    )
+
+    assert max(request_lengths) >= 2
+    assert [sum(result.visit_counts()) for result in results if result is not None] == [4, 4]
