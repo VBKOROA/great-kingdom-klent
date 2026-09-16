@@ -1,0 +1,20 @@
+[package]
+name = "great_kingdom_klent"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "great_kingdom_klent"
+
+[features]
+default = []
+cuda = ["great_kingdom_onnx/cuda"]
+
+[dependencies]
+great_kingdom_engine = { path = "../great_kingdom_engine" }
+great_kingdom_features = { path = "../great_kingdom_features" }
+great_kingdom_onnx = { path = "../great_kingdom_onnx" }
+rayon.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true

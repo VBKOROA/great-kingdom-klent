@@ -1,0 +1,12 @@
+[package]
+name = "great_kingdom_engine"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "great_kingdom_engine"
+
+[dependencies]
+
+[dev-dependencies]
+pretty_assertions.workspace = true

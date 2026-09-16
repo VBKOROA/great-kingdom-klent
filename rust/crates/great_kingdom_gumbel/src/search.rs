@@ -1,0 +1,1225 @@
+use std::{
+    ops::AddAssign,
+    time::{Duration, Instant},
+};
+
+use super::{
+    config::GumbelConfig,
+    node::GumbelNode,
+    policy::{
+        log_priors_from_logits, log_priors_from_priors, root_improved_action_logits,
+        root_improved_policy_target, root_search_value,
+    },
+    result::GumbelResult,
+    sampling::{RootCandidate, sample_root_candidates},
+    sequential_halving::RootSequentialHalving,
+};
+use great_kingdom_engine::game::{ACTION_SPACE, GameOutcome, GameState, Player};
+use great_kingdom_features::EvalRequest;
+
+use crate::error::GumbelError;
+
+#[derive(Clone, Debug)]
+pub struct GumbelSearch {
+    pub config: GumbelConfig,
+    pub(crate) nodes: Vec<GumbelNode>,
+    root_search_count: u64,
+}
+
+impl GumbelSearch {
+    #[must_use]
+    pub const fn new(config: GumbelConfig) -> Self {
+        Self {
+            config,
+            nodes: Vec::new(),
+            root_search_count: 0,
+        }
+    }
+
+    pub fn next_root_seed(&mut self) -> u64 {
+        let seed = self.config.seed.wrapping_add(self.root_search_count);
+        self.root_search_count = self.root_search_count.wrapping_add(1);
+        seed
+    }
+
+    pub fn reset_root_search_count(&mut self) {
+        self.root_search_count = 0;
+    }
+
+    #[must_use]
+    pub fn seed(&self) -> u64 {
+        self.config.seed
+    }
+
+    pub fn set_simulations(&mut self, simulations: u32) -> Result<(), GumbelError> {
+        if simulations == 0 {
+            return Err(GumbelError::message("simulations must be positive"));
+        }
+        self.config.simulations = simulations;
+        Ok(())
+    }
+
+    pub fn set_max_considered_actions(
+        &mut self,
+        max_considered_actions: usize,
+    ) -> Result<(), GumbelError> {
+        if max_considered_actions == 0 {
+            return Err(GumbelError::message(
+                "max_considered_actions must be positive",
+            ));
+        }
+        self.config.max_considered_actions = max_considered_actions;
+        Ok(())
+    }
+
+    pub fn set_seed(&mut self, seed: u64) {
+        self.config.seed = seed;
+        self.reset_root_search_count();
+    }
+
+    pub fn set_gumbel_scale(&mut self, gumbel_scale: f32) -> Result<(), GumbelError> {
+        if !gumbel_scale.is_finite() || gumbel_scale < 0.0 {
+            return Err(GumbelError::message(
+                "gumbel_scale must be a finite non-negative value",
+            ));
+        }
+        self.config.gumbel_scale = gumbel_scale;
+        Ok(())
+    }
+
+    pub fn search_with_logits(
+        &mut self,
+        state: &GameState,
+        policy_logits: &[f32],
+    ) -> Result<GumbelResult, GumbelError> {
+        self.result_from_logits(state, policy_logits)
+    }
+
+    pub fn search_with_priors(
+        &mut self,
+        state: &GameState,
+        priors: &[f32],
+    ) -> Result<GumbelResult, GumbelError> {
+        self.result_from_priors(state, priors)
+    }
+
+    pub fn result_from_logits(
+        &mut self,
+        state: &GameState,
+        logits: &[f32],
+    ) -> Result<GumbelResult, GumbelError> {
+        let legal_actions = state.legal_action_indexes();
+        let log_priors = log_priors_from_logits(&legal_actions, logits)?;
+        Ok(self.result_from_log_priors(state, &legal_actions, &log_priors))
+    }
+
+    pub fn result_from_priors(
+        &mut self,
+        state: &GameState,
+        priors: &[f32],
+    ) -> Result<GumbelResult, GumbelError> {
+        let legal_actions = state.legal_action_indexes();
+        let log_priors = log_priors_from_priors(&legal_actions, priors)?;
+        Ok(self.result_from_log_priors(state, &legal_actions, &log_priors))
+    }
+
+    pub fn result_from_logits_with_evaluator<F>(
+        &mut self,
+        state: &GameState,
+        logits: &[f32],
+        leaf_batch_size: usize,
+        root_value: f32,
+        evaluator: F,
+    ) -> Result<GumbelResult, GumbelError>
+    where
+        F: FnMut(EvalRequest) -> Result<GumbelEvalBatch, GumbelError>,
+    {
+        let legal_actions = state.legal_action_indexes();
+        let log_priors = log_priors_from_logits(&legal_actions, logits)?;
+        self.result_from_log_priors_with_evaluator(
+            state,
+            &legal_actions,
+            &log_priors,
+            leaf_batch_size,
+            root_value,
+            evaluator,
+            true,
+        )
+    }
+
+    pub fn result_from_priors_with_evaluator<F>(
+        &mut self,
+        state: &GameState,
+        priors: &[f32],
+        leaf_batch_size: usize,
+        root_value: f32,
+        evaluator: F,
+    ) -> Result<GumbelResult, GumbelError>
+    where
+        F: FnMut(EvalRequest) -> Result<GumbelEvalBatch, GumbelError>,
+    {
+        let legal_actions = state.legal_action_indexes();
+        let log_priors = log_priors_from_priors(&legal_actions, priors)?;
+        self.result_from_log_priors_with_evaluator(
+            state,
+            &legal_actions,
+            &log_priors,
+            leaf_batch_size,
+            root_value,
+            evaluator,
+            false,
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn result_from_log_priors(
+        &mut self,
+        state: &GameState,
+        legal_actions: &[usize],
+        log_priors: &[f32; ACTION_SPACE],
+    ) -> GumbelResult {
+        if legal_actions.is_empty() || state.is_terminal() {
+            return GumbelResult {
+                selected_action: None,
+                policy_target: [0.0; ACTION_SPACE],
+                visit_counts: [0; ACTION_SPACE],
+                root_value: 0.0,
+            };
+        }
+
+        let candidates = sample_root_candidates(
+            legal_actions,
+            log_priors,
+            self.config.max_considered_actions,
+            self.config.gumbel_scale,
+            self.next_root_seed(),
+        );
+        self.run_tree_search(state, legal_actions, log_priors, &candidates)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn result_from_log_priors_with_evaluator<F>(
+        &mut self,
+        state: &GameState,
+        legal_actions: &[usize],
+        log_priors: &[f32; ACTION_SPACE],
+        leaf_batch_size: usize,
+        root_value: f32,
+        evaluator: F,
+        evaluator_returns_logits: bool,
+    ) -> Result<GumbelResult, GumbelError>
+    where
+        F: FnMut(EvalRequest) -> Result<GumbelEvalBatch, GumbelError>,
+    {
+        if legal_actions.is_empty() || state.is_terminal() {
+            return Ok(GumbelResult {
+                selected_action: None,
+                policy_target: [0.0; ACTION_SPACE],
+                visit_counts: [0; ACTION_SPACE],
+                root_value: 0.0,
+            });
+        }
+
+        let candidates = sample_root_candidates(
+            legal_actions,
+            log_priors,
+            self.config.max_considered_actions,
+            self.config.gumbel_scale,
+            self.next_root_seed(),
+        );
+        self.run_tree_search_with_evaluator(
+            state,
+            legal_actions,
+            log_priors,
+            root_value,
+            &candidates,
+            leaf_batch_size,
+            evaluator,
+            evaluator_returns_logits,
+        )
+    }
+
+    #[must_use]
+    pub fn skeleton_result(&self, state: &GameState, scores: Option<&[f32]>) -> GumbelResult {
+        let legal_actions = state.legal_action_indexes();
+        if legal_actions.is_empty() || state.is_terminal() {
+            return GumbelResult {
+                selected_action: None,
+                policy_target: [0.0; ACTION_SPACE],
+                visit_counts: [0; ACTION_SPACE],
+                root_value: 0.0,
+            };
+        }
+
+        let selected_action = legal_actions.iter().copied().max_by(|left, right| {
+            let left_score = scores.map_or(0.0, |values| values[*left]);
+            let right_score = scores.map_or(0.0, |values| values[*right]);
+            left_score
+                .partial_cmp(&right_score)
+                .expect("validated policy scores must be finite")
+                .then_with(|| right.cmp(left))
+        });
+
+        let mut policy_target = [0.0; ACTION_SPACE];
+        let target = 1.0 / legal_actions.len() as f32;
+        for action in legal_actions {
+            policy_target[action] = target;
+        }
+
+        GumbelResult {
+            selected_action,
+            policy_target,
+            visit_counts: [0; ACTION_SPACE],
+            root_value: 0.0,
+        }
+    }
+
+    fn run_tree_search(
+        &mut self,
+        state: &GameState,
+        legal_actions: &[usize],
+        log_priors: &[f32; ACTION_SPACE],
+        candidates: &[RootCandidate],
+    ) -> GumbelResult {
+        if candidates.is_empty() {
+            return GumbelResult {
+                selected_action: None,
+                policy_target: [0.0; ACTION_SPACE],
+                visit_counts: [0; ACTION_SPACE],
+                root_value: 0.0,
+            };
+        }
+
+        self.nodes.clear();
+        let root_index = self.nodes.len();
+        self.nodes
+            .push(GumbelNode::root_from_candidates(state, candidates, 0.0));
+
+        let mut scheduler = RootSequentialHalving::new(
+            candidates
+                .iter()
+                .map(|candidate| (candidate.action, candidate.score))
+                .collect(),
+            self.config.simulations,
+        );
+
+        while !scheduler.is_done() {
+            let Some(root_action) = scheduler.next_action() else {
+                break;
+            };
+            let mut simulation_state = state.clone();
+            let Some(path_value) =
+                self.run_one_simulation(root_index, root_action, &mut simulation_state)
+            else {
+                break;
+            };
+            backup_path(
+                &mut self.nodes,
+                &path_value.path,
+                path_value.value,
+                path_value.is_leaf,
+            );
+            scheduler.reserve_visit(root_action);
+            scheduler.complete_reserved_visits(&root_ranking_scores(
+                &self.nodes[root_index],
+                self.config.c_visit,
+                self.config.c_scale,
+            ));
+        }
+
+        let improved = root_improved_policy_target(
+            &self.nodes[root_index],
+            legal_actions,
+            log_priors,
+            self.config.c_visit,
+            self.config.c_scale,
+            self.config.policy_target_c_visit,
+            self.config.policy_target_c_scale,
+            self.config.policy_target_temperature,
+        );
+
+        GumbelResult {
+            selected_action: improved.selected_action,
+            policy_target: improved.policy_target,
+            visit_counts: self.nodes[root_index].visit_counts(),
+            root_value: root_search_value(
+                &self.nodes[root_index],
+                legal_actions,
+                log_priors,
+                &improved.policy_target,
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_tree_search_with_evaluator<F>(
+        &mut self,
+        state: &GameState,
+        legal_actions: &[usize],
+        log_priors: &[f32; ACTION_SPACE],
+        root_value: f32,
+        candidates: &[RootCandidate],
+        leaf_batch_size: usize,
+        mut evaluator: F,
+        evaluator_returns_logits: bool,
+    ) -> Result<GumbelResult, GumbelError>
+    where
+        F: FnMut(EvalRequest) -> Result<GumbelEvalBatch, GumbelError>,
+    {
+        if candidates.is_empty() {
+            return Ok(GumbelResult {
+                selected_action: None,
+                policy_target: [0.0; ACTION_SPACE],
+                visit_counts: [0; ACTION_SPACE],
+                root_value: 0.0,
+            });
+        }
+
+        self.nodes.clear();
+        let root_index = self.nodes.len();
+        self.nodes.push(GumbelNode::root_from_candidates(
+            state, candidates, root_value,
+        ));
+
+        let mut scheduler = RootSequentialHalving::new(
+            candidates
+                .iter()
+                .map(|candidate| (candidate.action, candidate.score))
+                .collect(),
+            self.config.simulations,
+        );
+
+        let mut completed = 0;
+        while completed < self.config.simulations {
+            let batch_target =
+                (self.config.simulations - completed).min(leaf_batch_size as u32) as usize;
+            let mut pending = Vec::with_capacity(batch_target);
+
+            for _ in 0..batch_target {
+                if completed + pending.len() as u32 >= self.config.simulations {
+                    break;
+                }
+                let Some(root_action) = scheduler.next_action() else {
+                    break;
+                };
+                let mut simulation_state = state.clone();
+                match self.select_eval_leaf(root_index, root_action, &mut simulation_state) {
+                    PendingGumbelSimulation::NeedsEvaluation {
+                        path,
+                        state: leaf_state,
+                    } => {
+                        reserve_path(&mut self.nodes, &path);
+                        scheduler.reserve_visit(root_action);
+                        pending.push(PendingGumbelLeaf {
+                            path,
+                            state: leaf_state,
+                        });
+                    }
+                    PendingGumbelSimulation::Terminal { path, value } => {
+                        backup_path(&mut self.nodes, &path, value, false);
+                        scheduler.reserve_visit(root_action);
+                        scheduler.complete_reserved_visits(&root_ranking_scores(
+                            &self.nodes[root_index],
+                            self.config.c_visit,
+                            self.config.c_scale,
+                        ));
+                        completed += 1;
+                    }
+                    PendingGumbelSimulation::BlockedPending => break,
+                }
+            }
+
+            if pending.is_empty() {
+                continue;
+            }
+
+            let request_states = pending
+                .iter()
+                .map(|leaf| leaf.state.clone())
+                .collect::<Vec<_>>();
+            let eval = evaluator(EvalRequest::new_with_precomputed_bytes(request_states))?;
+            eval.validate_len(pending.len())?;
+            for (leaf, (policy_row, value)) in pending
+                .into_iter()
+                .zip(eval.policies.into_iter().zip(eval.values.into_iter()))
+            {
+                unreserve_path(&mut self.nodes, &leaf.path);
+                let child_index = self.expand_evaluated_node(
+                    &leaf.state,
+                    &policy_row,
+                    value,
+                    evaluator_returns_logits,
+                )?;
+                if let Some((parent_index, edge_index)) = leaf.path.last().copied() {
+                    self.nodes[parent_index].edges[edge_index].child = Some(child_index);
+                }
+                backup_path(&mut self.nodes, &leaf.path, value, true);
+                scheduler.complete_reserved_visits(&root_ranking_scores(
+                    &self.nodes[root_index],
+                    self.config.c_visit,
+                    self.config.c_scale,
+                ));
+                completed += 1;
+            }
+        }
+
+        let improved = root_improved_policy_target(
+            &self.nodes[root_index],
+            legal_actions,
+            log_priors,
+            self.config.c_visit,
+            self.config.c_scale,
+            self.config.policy_target_c_visit,
+            self.config.policy_target_c_scale,
+            self.config.policy_target_temperature,
+        );
+
+        Ok(GumbelResult {
+            selected_action: improved.selected_action,
+            policy_target: improved.policy_target,
+            visit_counts: self.nodes[root_index].visit_counts(),
+            root_value: root_search_value(
+                &self.nodes[root_index],
+                legal_actions,
+                log_priors,
+                &improved.policy_target,
+            ),
+        })
+    }
+
+    pub(crate) fn expand_evaluated_node(
+        &mut self,
+        state: &GameState,
+        policy_row: &[f32; ACTION_SPACE],
+        value: f32,
+        policy_is_logits: bool,
+    ) -> Result<usize, GumbelError> {
+        let legal_actions = state.legal_action_indexes();
+        let log_priors = if policy_is_logits {
+            log_priors_from_logits(&legal_actions, policy_row)?
+        } else {
+            log_priors_from_priors(&legal_actions, policy_row)?
+        };
+        let child_index = self.nodes.len();
+        self.nodes.push(GumbelNode::from_log_priors_for_actions(
+            state,
+            &legal_actions,
+            &log_priors,
+            value,
+        ));
+        Ok(child_index)
+    }
+
+    fn run_one_simulation(
+        &mut self,
+        root_index: usize,
+        root_action: usize,
+        state: &mut GameState,
+    ) -> Option<PathValue> {
+        let root_edge_index = self.nodes[root_index].edge_index_for_action(root_action)?;
+        let mut node_index = root_index;
+        let mut edge_index = root_edge_index;
+        let mut path = Vec::new();
+
+        loop {
+            let parent_player = self.nodes[node_index].to_play;
+            let action = self.nodes[node_index].edges[edge_index].action;
+            let outcome = state
+                .apply_trusted_search_action(action)
+                .expect("Gumbel search selected an action from legal_action_indexes");
+            path.push((node_index, edge_index));
+
+            if let Some(outcome) = outcome {
+                return Some(PathValue {
+                    path,
+                    value: value_for_player(outcome, parent_player),
+                    is_leaf: false,
+                });
+            }
+
+            if let Some(child_index) = self.nodes[node_index].edges[edge_index].child {
+                node_index = child_index;
+                let action_index = select_inner_action_index(
+                    &self.nodes[node_index],
+                    self.config.c_visit,
+                    self.config.c_scale,
+                )?;
+                edge_index = self.nodes[node_index].edge_index_for_action(action_index)?;
+                continue;
+            }
+
+            let child_index = self.nodes.len();
+            self.nodes
+                .push(GumbelNode::from_uniform_log_priors(state, 0.0));
+            self.nodes[node_index].edges[edge_index].child = Some(child_index);
+            return Some(PathValue {
+                path,
+                value: 0.0,
+                is_leaf: true,
+            });
+        }
+    }
+
+    pub(crate) fn select_eval_leaf(
+        &self,
+        root_index: usize,
+        root_action: usize,
+        state: &mut GameState,
+    ) -> PendingGumbelSimulation {
+        self.select_eval_leaf_traced(root_index, root_action, state, None)
+    }
+
+    pub(crate) fn select_eval_leaf_traced(
+        &self,
+        root_index: usize,
+        root_action: usize,
+        state: &mut GameState,
+        mut trace: Option<&mut GumbelSelectTrace>,
+    ) -> PendingGumbelSimulation {
+        let root_lookup_start = trace.as_ref().map(|_| Instant::now());
+        let root_edge_index = self.nodes[root_index].edge_index_for_action(root_action);
+        if let (Some(trace), Some(start)) = (trace.as_deref_mut(), root_lookup_start) {
+            trace.root_lookup_elapsed += start.elapsed();
+        }
+        let Some(root_edge_index) = root_edge_index else {
+            return PendingGumbelSimulation::BlockedPending;
+        };
+        let mut node_index = root_index;
+        let mut edge_index = root_edge_index;
+        let mut path = Vec::new();
+
+        loop {
+            if let Some(trace) = trace.as_deref_mut() {
+                trace.steps = trace.steps.saturating_add(1);
+            }
+            let parent_player = self.nodes[node_index].to_play;
+            let action = self.nodes[node_index].edges[edge_index].action;
+            let apply_start = trace.as_ref().map(|_| Instant::now());
+            let outcome = state
+                .apply_trusted_search_action(action)
+                .expect("Gumbel search selected an action from legal_action_indexes");
+            if let (Some(trace), Some(start)) = (trace.as_deref_mut(), apply_start) {
+                trace.apply_elapsed += start.elapsed();
+            }
+            let path_push_start = trace.as_ref().map(|_| Instant::now());
+            path.push((node_index, edge_index));
+            if let (Some(trace), Some(start)) = (trace.as_deref_mut(), path_push_start) {
+                trace.path_push_elapsed += start.elapsed();
+            }
+
+            if let Some(outcome) = outcome {
+                return PendingGumbelSimulation::Terminal {
+                    path,
+                    value: value_for_player(outcome, parent_player),
+                };
+            }
+
+            if let Some(child_index) = self.nodes[node_index].edges[edge_index].child {
+                node_index = child_index;
+                let inner_select_start = trace.as_ref().map(|_| Instant::now());
+                let Some(action_index) = select_inner_action_index(
+                    &self.nodes[node_index],
+                    self.config.c_visit,
+                    self.config.c_scale,
+                ) else {
+                    return PendingGumbelSimulation::BlockedPending;
+                };
+                if let (Some(trace), Some(start)) = (trace.as_deref_mut(), inner_select_start) {
+                    trace.inner_select_elapsed += start.elapsed();
+                }
+                let edge_lookup_start = trace.as_ref().map(|_| Instant::now());
+                let next_edge_index = self.nodes[node_index].edge_index_for_action(action_index);
+                if let (Some(trace), Some(start)) = (trace.as_deref_mut(), edge_lookup_start) {
+                    trace.edge_lookup_elapsed += start.elapsed();
+                }
+                let Some(next_edge_index) = next_edge_index else {
+                    return PendingGumbelSimulation::BlockedPending;
+                };
+                edge_index = next_edge_index;
+                continue;
+            }
+
+            if self.nodes[node_index].edges[edge_index].pending_evaluation {
+                return PendingGumbelSimulation::BlockedPending;
+            }
+
+            let leaf_clone_start = trace.as_ref().map(|_| Instant::now());
+            let leaf_state = state.clone();
+            if let (Some(trace), Some(start)) = (trace.as_deref_mut(), leaf_clone_start) {
+                trace.leaf_clone_elapsed += start.elapsed();
+            }
+            return PendingGumbelSimulation::NeedsEvaluation {
+                path,
+                state: leaf_state,
+            };
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GumbelSelectTrace {
+    pub(crate) steps: u64,
+    pub(crate) root_lookup_elapsed: Duration,
+    pub(crate) apply_elapsed: Duration,
+    pub(crate) path_push_elapsed: Duration,
+    pub(crate) inner_select_elapsed: Duration,
+    pub(crate) edge_lookup_elapsed: Duration,
+    pub(crate) leaf_clone_elapsed: Duration,
+}
+
+impl AddAssign for GumbelSelectTrace {
+    fn add_assign(&mut self, rhs: Self) {
+        self.steps = self.steps.saturating_add(rhs.steps);
+        self.root_lookup_elapsed += rhs.root_lookup_elapsed;
+        self.apply_elapsed += rhs.apply_elapsed;
+        self.path_push_elapsed += rhs.path_push_elapsed;
+        self.inner_select_elapsed += rhs.inner_select_elapsed;
+        self.edge_lookup_elapsed += rhs.edge_lookup_elapsed;
+        self.leaf_clone_elapsed += rhs.leaf_clone_elapsed;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PathValue {
+    path: Vec<(usize, usize)>,
+    value: f32,
+    is_leaf: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GumbelEvalBatch {
+    pub policies: Vec<[f32; ACTION_SPACE]>,
+    pub values: Vec<f32>,
+}
+
+impl GumbelEvalBatch {
+    #[must_use]
+    pub fn new(policies: Vec<[f32; ACTION_SPACE]>, values: Vec<f32>) -> Self {
+        Self { policies, values }
+    }
+
+    pub fn validate_len(&self, expected: usize) -> Result<(), GumbelError> {
+        if self.policies.len() != expected || self.values.len() != expected {
+            return Err(GumbelError::message(format!(
+                "expected {expected} policy/value rows, got {}/{}",
+                self.policies.len(),
+                self.values.len()
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PendingGumbelLeaf {
+    path: Vec<(usize, usize)>,
+    state: GameState,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PendingGumbelSimulation {
+    NeedsEvaluation {
+        path: Vec<(usize, usize)>,
+        state: GameState,
+    },
+    Terminal {
+        path: Vec<(usize, usize)>,
+        value: f32,
+    },
+    BlockedPending,
+}
+
+const INNER_Q_RANGE_EPSILON: f32 = 1.0e-6;
+const INNER_PRIOR_PROB_EPSILON: f32 = 1.0e-8;
+
+fn select_inner_action_index(node: &GumbelNode, c_visit: f32, c_scale: f32) -> Option<usize> {
+    if node.edges.is_empty() {
+        return None;
+    }
+
+    let max_log_prior = node
+        .edges
+        .iter()
+        .map(|edge| edge.log_prior)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let sum_exp_prior = node
+        .edges
+        .iter()
+        .map(|edge| (edge.log_prior - max_log_prior).exp())
+        .sum::<f32>();
+    let total_visits = node.edges.iter().map(|edge| edge.visit_count).sum::<u32>();
+    let max_visit_count = node
+        .edges
+        .iter()
+        .map(|edge| edge.visit_count)
+        .max()
+        .unwrap_or(0) as f32;
+
+    let mut visited_prior_sum = 0.0;
+    let mut visited_weighted_q = 0.0;
+    if total_visits > 0 {
+        for edge in &node.edges {
+            if edge.visit_count == 0 {
+                continue;
+            }
+            let prior_prob = ((edge.log_prior - max_log_prior).exp() / sum_exp_prior)
+                .max(INNER_PRIOR_PROB_EPSILON);
+            visited_prior_sum += prior_prob;
+            visited_weighted_q += prior_prob * edge.value_sum / edge.visit_count as f32;
+        }
+    }
+
+    let mixed_value = if total_visits == 0 || visited_prior_sum <= 0.0 {
+        node.node_value
+    } else {
+        let weighted_q = visited_weighted_q / visited_prior_sum;
+        (node.node_value + total_visits as f32 * weighted_q) / (total_visits as f32 + 1.0)
+    };
+
+    let mut q_min = f32::INFINITY;
+    let mut q_max = f32::NEG_INFINITY;
+    for edge in &node.edges {
+        let completed_q = if edge.visit_count > 0 {
+            edge.value_sum / edge.visit_count as f32
+        } else {
+            mixed_value
+        };
+        q_min = q_min.min(completed_q);
+        q_max = q_max.max(completed_q);
+    }
+    let q_range = (q_max - q_min).max(INNER_Q_RANGE_EPSILON);
+    let visit_scale = (c_visit + max_visit_count) * c_scale;
+
+    let mut max_logit = f32::NEG_INFINITY;
+    for edge in &node.edges {
+        let completed_q = if edge.visit_count > 0 {
+            edge.value_sum / edge.visit_count as f32
+        } else {
+            mixed_value
+        };
+        let q_bonus = visit_scale * ((completed_q - q_min) / q_range);
+        max_logit = max_logit.max(edge.log_prior + q_bonus);
+    }
+
+    let sum_exp_logit = node
+        .edges
+        .iter()
+        .map(|edge| {
+            let completed_q = if edge.visit_count > 0 {
+                edge.value_sum / edge.visit_count as f32
+            } else {
+                mixed_value
+            };
+            let q_bonus = visit_scale * ((completed_q - q_min) / q_range);
+            (edge.log_prior + q_bonus - max_logit).exp()
+        })
+        .sum::<f32>();
+
+    let total_visits_f32 = total_visits as f32;
+    let mut best: Option<(usize, f32)> = None;
+    for edge in &node.edges {
+        let completed_q = if edge.visit_count > 0 {
+            edge.value_sum / edge.visit_count as f32
+        } else {
+            mixed_value
+        };
+        let q_bonus = visit_scale * ((completed_q - q_min) / q_range);
+        let probability = (edge.log_prior + q_bonus - max_logit).exp() / sum_exp_logit;
+        let score = probability - edge.visit_count as f32 / (1.0 + total_visits_f32);
+        let action = edge.action.to_index();
+        let replace = best.is_none_or(|(best_action, best_score)| {
+            score.total_cmp(&best_score).is_gt()
+                || (score.total_cmp(&best_score).is_eq() && action < best_action)
+        });
+        if replace {
+            best = Some((action, score));
+        }
+    }
+
+    best.map(|(action, _)| action)
+}
+
+pub(crate) fn root_ranking_scores(
+    root: &GumbelNode,
+    c_visit: f32,
+    c_scale: f32,
+) -> Vec<(usize, f32)> {
+    root_improved_action_logits(root, c_visit, c_scale)
+}
+
+pub(crate) fn backup_path(
+    nodes: &mut [GumbelNode],
+    path: &[(usize, usize)],
+    value: f32,
+    is_leaf: bool,
+) {
+    let mut edge_value = value;
+    for (node_index, edge_index) in path.iter().rev().copied() {
+        if is_leaf {
+            edge_value = -edge_value;
+        }
+        nodes[node_index].visit_count = nodes[node_index].visit_count.saturating_add(1);
+        nodes[node_index].edges[edge_index].update(edge_value);
+        if !is_leaf {
+            edge_value = -edge_value;
+        }
+    }
+}
+
+pub(crate) fn reserve_path(nodes: &mut [GumbelNode], path: &[(usize, usize)]) {
+    if let Some((node_index, edge_index)) = path.last().copied() {
+        nodes[node_index].edges[edge_index].pending_evaluation = true;
+    }
+}
+
+pub(crate) fn unreserve_path(nodes: &mut [GumbelNode], path: &[(usize, usize)]) {
+    if let Some((node_index, edge_index)) = path.last().copied() {
+        nodes[node_index].edges[edge_index].pending_evaluation = false;
+    }
+}
+
+fn value_for_player(outcome: GameOutcome, player: Player) -> f32 {
+    if outcome.winner == player { 1.0 } else { -1.0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GumbelEvalBatch, GumbelSearch, backup_path, select_inner_action_index};
+    use crate::{
+        config::GumbelConfig, error::GumbelError, node::GumbelNode, selection::select_inner_action,
+    };
+    use great_kingdom_engine::game::{
+        ACTION_SPACE, CENTER_INDEX, Cell, GameState, Player, state_with_board,
+    };
+    use great_kingdom_features::{EvalRequest, FEATURE_CHANNELS};
+
+    fn index(row: usize, col: usize) -> usize {
+        row * 9 + col
+    }
+
+    #[test]
+    fn root_seed_advances_per_search_and_resets_when_seed_is_set() {
+        let mut search = GumbelSearch::new(GumbelConfig::new(4, 2, 50.0, 1.0, 7));
+
+        assert_eq!(search.seed(), 7);
+        assert_eq!(search.next_root_seed(), 7);
+        assert_eq!(search.next_root_seed(), 8);
+
+        search.set_seed(42);
+
+        assert_eq!(search.seed(), 42);
+        assert_eq!(search.next_root_seed(), 42);
+    }
+
+    #[test]
+    fn tree_search_expands_child_nodes_and_records_root_visits() {
+        let mut search = GumbelSearch::new(GumbelConfig::new(6, 2, 50.0, 1.0, 7));
+        let mut logits = [0.0; ACTION_SPACE];
+        logits[0] = 3.0;
+
+        let result = search
+            .result_from_logits(&GameState::new(), &logits)
+            .unwrap();
+
+        assert!(search.nodes.len() > 1);
+        assert_eq!(result.visit_counts.iter().sum::<u32>(), 6);
+    }
+
+    #[test]
+    fn terminal_root_transition_backs_up_parent_player_win() {
+        let mut board = [Cell::Empty; ACTION_SPACE - 1];
+        board[CENTER_INDEX] = Cell::Neutral;
+        board[index(1, 1)] = Cell::Orange;
+        board[index(0, 1)] = Cell::Blue;
+        board[index(1, 0)] = Cell::Blue;
+        board[index(1, 2)] = Cell::Blue;
+        let state = state_with_board(board, Player::Blue);
+        let winning_action = index(2, 1);
+        let mut logits = [0.0; ACTION_SPACE];
+        logits[winning_action] = 10.0;
+
+        let mut search = GumbelSearch::new(GumbelConfig::new(4, 1, 50.0, 1.0, 1));
+        let result = search.result_from_logits(&state, &logits).unwrap();
+
+        assert_eq!(result.selected_action, Some(winning_action));
+        assert_eq!(result.visit_counts[winning_action], 4);
+        assert_eq!(search.nodes[0].edges[0].mean_q(), Some(1.0));
+    }
+
+    #[test]
+    fn leaf_backup_flips_value_sign_at_each_depth() {
+        let state = GameState::new();
+        let mut nodes = vec![
+            GumbelNode::from_uniform_log_priors(&state, 0.0),
+            GumbelNode::from_uniform_log_priors(&state, 0.0),
+            GumbelNode::from_uniform_log_priors(&state, 0.0),
+        ];
+        let path = [(0, 0), (1, 0), (2, 0)];
+
+        backup_path(&mut nodes, &path, 0.75, true);
+
+        assert_eq!(nodes[2].edges[0].mean_q(), Some(-0.75));
+        assert_eq!(nodes[1].edges[0].mean_q(), Some(0.75));
+        assert_eq!(nodes[0].edges[0].mean_q(), Some(-0.75));
+    }
+
+    #[test]
+    fn fast_inner_selector_matches_reference_selection() {
+        let state = GameState::new();
+        let mut log_priors = [-4.0; ACTION_SPACE];
+        let legal_actions = [0, 1, 2, 10, 81];
+        for (offset, action) in legal_actions.iter().copied().enumerate() {
+            log_priors[action] = -0.25 * offset as f32;
+        }
+        let mut node =
+            GumbelNode::from_log_priors_for_actions(&state, &legal_actions, &log_priors, 0.35);
+
+        let cases = [
+            [(0, 0.0), (0, 0.0), (0, 0.0), (0, 0.0), (0, 0.0)],
+            [(3, 1.5), (0, 0.0), (2, -1.0), (1, 0.25), (0, 0.0)],
+            [(10, 6.0), (1, -0.5), (0, 0.0), (4, 1.0), (2, -0.25)],
+        ];
+
+        for case in cases {
+            for (edge, (visit_count, value_sum)) in node.edges.iter_mut().zip(case) {
+                edge.visit_count = visit_count;
+                edge.value_sum = value_sum;
+            }
+            let reference_edges = node
+                .edges
+                .iter()
+                .map(|edge| edge.inner_stats())
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                select_inner_action_index(&node, 50.0, 1.0),
+                select_inner_action(&reference_edges, node.node_value, 50.0, 1.0),
+            );
+            assert_eq!(
+                select_inner_action_index(&node, 1.5, 0.25),
+                select_inner_action(&reference_edges, node.node_value, 1.5, 0.25),
+            );
+        }
+
+        let tie_actions = [10, 2];
+        let tie_node = GumbelNode::from_log_priors_for_actions(
+            &state,
+            &tie_actions,
+            &[0.0; ACTION_SPACE],
+            0.0,
+        );
+        assert_eq!(select_inner_action_index(&tie_node, 50.0, 1.0), Some(2));
+    }
+
+    #[test]
+    fn evaluator_path_batches_leaf_requests_and_expands_with_logits() {
+        let mut search = GumbelSearch::new(GumbelConfig::new(6, 4, 50.0, 1.0, 7));
+        let root_logits = [0.0; ACTION_SPACE];
+        let mut max_request_len = 0;
+
+        let result = search
+            .result_from_logits_with_evaluator(&GameState::new(), &root_logits, 4, 0.0, |request| {
+                max_request_len = max_request_len.max(request.len());
+                let mut rows = Vec::with_capacity(request.len());
+                let mut values = Vec::with_capacity(request.len());
+                for _ in 0..request.len() {
+                    let mut logits = [-3.0; ACTION_SPACE];
+                    logits[0] = 4.0;
+                    logits[1] = 2.0;
+                    rows.push(logits);
+                    values.push(0.25);
+                }
+                Ok(GumbelEvalBatch::new(rows, values))
+            })
+            .unwrap();
+
+        assert!(max_request_len > 1);
+        assert_eq!(result.visit_counts.iter().sum::<u32>(), 6);
+        assert!(search.nodes.len() > 1);
+        assert!(search.nodes.iter().skip(1).any(|node| {
+            let log_priors = node
+                .edges
+                .iter()
+                .map(|edge| edge.log_prior)
+                .collect::<Vec<_>>();
+            log_priors.windows(2).any(|pair| pair[0] != pair[1])
+        }));
+    }
+
+    #[test]
+    fn leaf_batch_size_one_keeps_leaf_evaluation_sequential() {
+        let root_logits = [0.0; ACTION_SPACE];
+        let evaluator = |request: EvalRequest| {
+            let mut rows = Vec::with_capacity(request.len());
+            let mut values = Vec::with_capacity(request.len());
+            for _ in 0..request.len() {
+                let mut logits = [-3.0; ACTION_SPACE];
+                logits[0] = 4.0;
+                logits[1] = 2.0;
+                rows.push(logits);
+                values.push(0.25);
+            }
+            Ok(GumbelEvalBatch::new(rows, values))
+        };
+
+        let mut sequential_request_lengths = Vec::new();
+        let mut sequential_search = GumbelSearch::new(GumbelConfig::new(6, 4, 50.0, 1.0, 7));
+        let sequential_result = sequential_search
+            .result_from_logits_with_evaluator(&GameState::new(), &root_logits, 1, 0.0, |request| {
+                sequential_request_lengths.push(request.len());
+                evaluator(request)
+            })
+            .unwrap();
+
+        let mut batched_request_lengths = Vec::new();
+        let mut batched_search = GumbelSearch::new(GumbelConfig::new(6, 4, 50.0, 1.0, 7));
+        let batched_result = batched_search
+            .result_from_logits_with_evaluator(&GameState::new(), &root_logits, 4, 0.0, |request| {
+                batched_request_lengths.push(request.len());
+                evaluator(request)
+            })
+            .unwrap();
+
+        assert!(sequential_request_lengths.iter().all(|length| *length == 1));
+        assert!(batched_request_lengths.iter().any(|length| *length > 1));
+        assert_eq!(sequential_result.visit_counts.iter().sum::<u32>(), 6);
+        assert_eq!(batched_result.visit_counts.iter().sum::<u32>(), 6);
+    }
+
+    fn leaf_batch_probe_evaluator(
+        request: EvalRequest,
+        bad_action: usize,
+    ) -> Result<GumbelEvalBatch, GumbelError> {
+        const BOARD_CELLS: usize = 81;
+        const OWN_CASTLE_CHANNEL: usize = 0;
+        const OPPONENT_CASTLE_CHANNEL: usize = 1;
+
+        let features = request.feature_values_ref();
+        let mut rows = Vec::with_capacity(request.len());
+        let mut values = Vec::with_capacity(request.len());
+        for planes in features.chunks_exact(FEATURE_CHANNELS * BOARD_CELLS) {
+            rows.push([0.0; ACTION_SPACE]);
+
+            let occupied = |action: usize| {
+                planes[OWN_CASTLE_CHANNEL * BOARD_CELLS + action] > 0.5
+                    || planes[OPPONENT_CASTLE_CHANNEL * BOARD_CELLS + action] > 0.5
+            };
+            // The configured root candidate is bad for the root player. At a depth-1
+            // leaf, positive value is from the opponent's perspective and is
+            // backed up as a negative root-edge value.
+            values.push(if occupied(bad_action) { 1.0 } else { -1.0 });
+        }
+        Ok(GumbelEvalBatch::new(rows, values))
+    }
+
+    #[test]
+    fn leaf_batching_matches_sequential_root_outputs_for_deterministic_evaluator() {
+        let mut max_root_visit_l1 = 0_u32;
+        let mut max_policy_l1 = 0.0_f32;
+        for simulations in [8, 12, 16, 24] {
+            for max_considered_actions in [2, 4, 8] {
+                for bad_action in 0..max_considered_actions {
+                    let mut root_logits = [-100.0; ACTION_SPACE];
+                    for (action, root_logit) in root_logits
+                        .iter_mut()
+                        .enumerate()
+                        .take(max_considered_actions)
+                    {
+                        *root_logit = (max_considered_actions - action) as f32;
+                    }
+
+                    let config = GumbelConfig::new_with_full_config(
+                        simulations,
+                        max_considered_actions,
+                        50.0,
+                        1.0,
+                        7,
+                        0.0,
+                        1.0,
+                        50.0,
+                        1.0,
+                    );
+                    let mut sequential_search = GumbelSearch::new(config);
+                    let sequential_result = sequential_search
+                        .result_from_logits_with_evaluator(
+                            &GameState::new(),
+                            &root_logits,
+                            1,
+                            0.0,
+                            |request| leaf_batch_probe_evaluator(request, bad_action),
+                        )
+                        .unwrap();
+
+                    let mut batched_search = GumbelSearch::new(config);
+                    let batched_result = batched_search
+                        .result_from_logits_with_evaluator(
+                            &GameState::new(),
+                            &root_logits,
+                            max_considered_actions,
+                            0.0,
+                            |request| leaf_batch_probe_evaluator(request, bad_action),
+                        )
+                        .unwrap();
+
+                    let root_visit_l1 = sequential_result
+                        .visit_counts
+                        .iter()
+                        .zip(batched_result.visit_counts.iter())
+                        .map(|(left, right)| left.abs_diff(*right))
+                        .sum::<u32>();
+                    let policy_l1 = sequential_result
+                        .policy_target
+                        .iter()
+                        .zip(batched_result.policy_target.iter())
+                        .map(|(left, right)| (left - right).abs())
+                        .sum::<f32>();
+
+                    max_root_visit_l1 = max_root_visit_l1.max(root_visit_l1);
+                    max_policy_l1 = max_policy_l1.max(policy_l1);
+
+                    assert_eq!(
+                        sequential_result.selected_action, batched_result.selected_action,
+                        "simulations={simulations} max_considered_actions={max_considered_actions} bad_action={bad_action}",
+                    );
+                    assert_eq!(
+                        sequential_result.visit_counts, batched_result.visit_counts,
+                        "root visit L1={root_visit_l1}; simulations={simulations} max_considered_actions={max_considered_actions} bad_action={bad_action}",
+                    );
+                    assert!(
+                        policy_l1 <= 1.0e-6,
+                        "policy target L1={policy_l1}; simulations={simulations} max_considered_actions={max_considered_actions} bad_action={bad_action}",
+                    );
+                    assert!(
+                        (sequential_result.root_value - batched_result.root_value).abs() <= 1.0e-6,
+                        "root value drift: sequential={} batched={}; simulations={simulations} max_considered_actions={max_considered_actions} bad_action={bad_action}",
+                        sequential_result.root_value,
+                        batched_result.root_value,
+                    );
+                }
+            }
+        }
+
+        assert_eq!(max_root_visit_l1, 0);
+        assert!(max_policy_l1 <= 1.0e-6);
+    }
+
+    #[test]
+    fn pending_guard_prevents_duplicate_leaf_evaluation_in_same_wave() {
+        let mut search = GumbelSearch::new(GumbelConfig::new(4, 1, 50.0, 1.0, 7));
+        let mut root_logits = [0.0; ACTION_SPACE];
+        root_logits[0] = 10.0;
+        let mut request_lengths = Vec::new();
+
+        search
+            .result_from_logits_with_evaluator(&GameState::new(), &root_logits, 4, 0.0, |request| {
+                request_lengths.push(request.len());
+                Ok(GumbelEvalBatch::new(
+                    vec![[0.0; ACTION_SPACE]; request.len()],
+                    vec![0.0; request.len()],
+                ))
+            })
+            .unwrap();
+
+        assert!(request_lengths.iter().all(|length| *length == 1));
+    }
+}

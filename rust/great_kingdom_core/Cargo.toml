@@ -1,7 +1,7 @@
 [package]
 name = "great_kingdom_core"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [lib]
 name = "great_kingdom_core"
@@ -10,17 +10,20 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 extension-module = ["pyo3/extension-module"]
-onnx-cuda = ["ort/cuda"]
+onnx-cuda = [
+    "great_kingdom_onnx/cuda",
+    "great_kingdom_gumbel/cuda",
+    "great_kingdom_klent/cuda",
+]
 
 [dependencies]
-ort = { version = "=2.0.0-rc.10", default-features = false, features = [
-    "copy-dylibs",
-    "download-binaries",
-    "ndarray",
-    "std",
-] }
-pyo3 = { version = "0.25" }
-rayon = "1.12.0"
+great_kingdom_engine = { path = "../crates/great_kingdom_engine" }
+great_kingdom_features = { path = "../crates/great_kingdom_features" }
+great_kingdom_gumbel = { path = "../crates/great_kingdom_gumbel" }
+great_kingdom_klent = { path = "../crates/great_kingdom_klent" }
+great_kingdom_onnx = { path = "../crates/great_kingdom_onnx" }
+pyo3.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
-pretty_assertions = "1.4"
+pretty_assertions.workspace = true
