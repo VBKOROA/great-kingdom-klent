@@ -1,4 +1,4 @@
-use pyo3::{exceptions::PyValueError, prelude::*};
+use crate::error::GumbelError;
 
 use super::{
     node::GumbelNode,
@@ -11,7 +11,7 @@ use super::{
     search::{GumbelSearch, root_ranking_scores},
     sequential_halving::RootSequentialHalving,
 };
-use crate::game::{ACTION_SPACE, GameState};
+use great_kingdom_engine::game::{ACTION_SPACE, GameState};
 
 pub(crate) struct RootSearchState {
     pub(crate) root_index: usize,
@@ -62,9 +62,9 @@ pub(crate) fn start_root_search(
     row: &[f32],
     row_is_logits: bool,
     root_value: f32,
-) -> PyResult<Option<RootSearchState>> {
+) -> Result<Option<RootSearchState>, GumbelError> {
     if row.len() != ACTION_SPACE {
-        return Err(PyValueError::new_err(format!(
+        return Err(GumbelError::message(format!(
             "expected {ACTION_SPACE} policy values, got {}",
             row.len()
         )));

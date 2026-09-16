@@ -1,10 +1,9 @@
-use pyo3::{exceptions::PyRuntimeError, exceptions::PyValueError, prelude::*};
 use rayon::prelude::*;
 use std::time::Instant;
 
 use super::{
     config::GumbelConfig,
-    evaluator::{GumbelEvaluator, OnnxGumbelEvaluator, PythonGumbelEvaluator},
+    evaluator::{GumbelEvaluator, OnnxGumbelEvaluator},
     profile::{GumbelBatchProfile, GumbelBatchWaveProfile, SelectWaveDetail},
     result::GumbelResult,
     root::{RootSearchState, empty_result, start_root_search},
@@ -13,36 +12,20 @@ use super::{
         reserve_path, unreserve_path,
     },
 };
-use crate::{
-    eval_request::EvalRequest,
-    game::{ACTION_SPACE, Action, GameState},
-    onnx::{NetworkOutput, OnnxEvaluator},
-};
+use crate::error::GumbelError;
+use great_kingdom_engine::game::{ACTION_SPACE, Action, GameState};
+use great_kingdom_features::{EvalRequest, GameStateFeatures};
+use great_kingdom_onnx::{NetworkOutput, OnnxEvaluator};
 
 type SearchActiveWithRootLogits = (Vec<Option<GumbelResult>>, Vec<Vec<f32>>);
 
-#[pyclass]
 #[derive(Clone, Debug)]
 pub struct GumbelSelfPlayBatch {
     states: Vec<GameState>,
     searches: Vec<GumbelSearch>,
 }
 
-#[pymethods]
 impl GumbelSelfPlayBatch {
-    #[new]
-    #[pyo3(signature = (
-        game_count,
-        simulations = 128,
-        max_considered_actions = 16,
-        c_visit = 50.0,
-        c_scale = 1.0,
-        seed = 2026,
-        gumbel_scale = 1.0,
-        policy_target_temperature = 1.0,
-        policy_target_c_visit = None,
-        policy_target_c_scale = None
-    ))]
     #[allow(clippy::too_many_arguments)]
     pub fn py_new(
         game_count: usize,
@@ -55,14 +38,14 @@ impl GumbelSelfPlayBatch {
         policy_target_temperature: f32,
         policy_target_c_visit: Option<f32>,
         policy_target_c_scale: Option<f32>,
-    ) -> PyResult<Self> {
+    ) -> Result<Self, GumbelError> {
         if game_count == 0 {
-            return Err(PyValueError::new_err("game_count must be positive"));
+            return Err(GumbelError::message("game_count must be positive"));
         }
         let policy_target_c_visit = policy_target_c_visit
-            .ok_or_else(|| PyValueError::new_err("policy_target_c_visit must be set"))?;
+            .ok_or_else(|| GumbelError::message("policy_target_c_visit must be set"))?;
         let policy_target_c_scale = policy_target_c_scale
-            .ok_or_else(|| PyValueError::new_err("policy_target_c_scale must be set"))?;
+            .ok_or_else(|| GumbelError::message("policy_target_c_scale must be set"))?;
         let config = GumbelConfig::new_with_full_config(
             simulations,
             max_considered_actions,
@@ -78,19 +61,6 @@ impl GumbelSelfPlayBatch {
         Ok(Self::new(game_count, config))
     }
 
-    #[staticmethod]
-    #[pyo3(signature = (
-        action_histories,
-        simulations = 128,
-        max_considered_actions = 16,
-        c_visit = 50.0,
-        c_scale = 1.0,
-        seed = 2026,
-        gumbel_scale = 1.0,
-        policy_target_temperature = 1.0,
-        policy_target_c_visit = None,
-        policy_target_c_scale = None
-    ))]
     #[allow(clippy::too_many_arguments)]
     pub fn from_action_histories(
         action_histories: Vec<Vec<usize>>,
@@ -103,14 +73,14 @@ impl GumbelSelfPlayBatch {
         policy_target_temperature: f32,
         policy_target_c_visit: Option<f32>,
         policy_target_c_scale: Option<f32>,
-    ) -> PyResult<Self> {
+    ) -> Result<Self, GumbelError> {
         if action_histories.is_empty() {
-            return Err(PyValueError::new_err("action_histories must not be empty"));
+            return Err(GumbelError::message("action_histories must not be empty"));
         }
         let policy_target_c_visit = policy_target_c_visit
-            .ok_or_else(|| PyValueError::new_err("policy_target_c_visit must be set"))?;
+            .ok_or_else(|| GumbelError::message("policy_target_c_visit must be set"))?;
         let policy_target_c_scale = policy_target_c_scale
-            .ok_or_else(|| PyValueError::new_err("policy_target_c_scale must be set"))?;
+            .ok_or_else(|| GumbelError::message("policy_target_c_scale must be set"))?;
         let config = GumbelConfig::new_with_full_config(
             simulations,
             max_considered_actions,
@@ -159,11 +129,11 @@ impl GumbelSelfPlayBatch {
     pub fn feature_rows_for_game_indexes(
         &self,
         game_indexes: Vec<usize>,
-    ) -> PyResult<Vec<Vec<f32>>> {
+    ) -> Result<Vec<Vec<f32>>, GumbelError> {
         let mut rows = Vec::with_capacity(game_indexes.len());
         for game_index in game_indexes {
             let state = self.states.get(game_index).ok_or_else(|| {
-                PyValueError::new_err(format!("game index out of range: {game_index}"))
+                GumbelError::message(format!("game index out of range: {game_index}"))
             })?;
             rows.push(state.feature_planes());
         }
@@ -206,52 +176,31 @@ impl GumbelSelfPlayBatch {
     pub fn search_active_with_logits(
         &mut self,
         policy_logits: Vec<Vec<f32>>,
-    ) -> PyResult<Vec<Option<GumbelResult>>> {
+    ) -> Result<Vec<Option<GumbelResult>>, GumbelError> {
         self.search_active(policy_logits, true)
     }
 
-    #[pyo3(signature = (policy_logits, evaluator, root_values, leaf_batch_size = 16))]
-    pub fn search_active_with_logits_and_evaluator(
-        &mut self,
-        policy_logits: Vec<Vec<f32>>,
-        evaluator: &Bound<'_, PyAny>,
-        root_values: Vec<f32>,
-        leaf_batch_size: usize,
-    ) -> PyResult<Vec<Option<GumbelResult>>> {
-        if leaf_batch_size == 0 {
-            return Err(PyValueError::new_err("leaf_batch_size must be positive"));
-        }
-        let mut evaluator = PythonGumbelEvaluator::new(evaluator);
-        self.search_active_with_evaluator(
-            policy_logits,
-            true,
-            &mut evaluator,
-            leaf_batch_size,
-            &root_values,
-        )
-    }
 
-    #[pyo3(signature = (evaluator, leaf_batch_size = 16))]
     pub fn search_active_with_onnx_evaluator(
         &mut self,
-        mut evaluator: PyRefMut<'_, OnnxEvaluator>,
+        evaluator: &mut OnnxEvaluator,
         leaf_batch_size: usize,
-    ) -> PyResult<Vec<Option<GumbelResult>>> {
+    ) -> Result<Vec<Option<GumbelResult>>, GumbelError> {
         if leaf_batch_size == 0 {
-            return Err(PyValueError::new_err("leaf_batch_size must be positive"));
+            return Err(GumbelError::message("leaf_batch_size must be positive"));
         }
         let active_request = self.active_eval_request_features();
         evaluator.set_gumbel_root_profile_context(active_request.len());
         let root_output = evaluator
             .evaluate_request(&active_request)
-            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+            .map_err(|err| GumbelError::message(err.to_string()))?;
         let root_values = root_output.values;
         let policy_logits = root_output
             .policy_logits
             .into_iter()
             .map(Vec::from)
             .collect();
-        let mut adapter = OnnxGumbelEvaluator::new(&mut evaluator);
+        let mut adapter = OnnxGumbelEvaluator::new(evaluator);
         self.search_active_with_evaluator(
             policy_logits,
             true,
@@ -261,20 +210,19 @@ impl GumbelSelfPlayBatch {
         )
     }
 
-    #[pyo3(signature = (evaluator, leaf_batch_size = 16))]
     pub fn search_active_with_onnx_evaluator_and_root_logits(
         &mut self,
-        mut evaluator: PyRefMut<'_, OnnxEvaluator>,
+        evaluator: &mut OnnxEvaluator,
         leaf_batch_size: usize,
-    ) -> PyResult<SearchActiveWithRootLogits> {
+    ) -> Result<SearchActiveWithRootLogits, GumbelError> {
         if leaf_batch_size == 0 {
-            return Err(PyValueError::new_err("leaf_batch_size must be positive"));
+            return Err(GumbelError::message("leaf_batch_size must be positive"));
         }
         let active_request = self.active_eval_request_features();
         evaluator.set_gumbel_root_profile_context(active_request.len());
         let root_output = evaluator
             .evaluate_request(&active_request)
-            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+            .map_err(|err| GumbelError::message(err.to_string()))?;
         let root_values = root_output.values;
         let policy_logits: Vec<Vec<f32>> = root_output
             .policy_logits
@@ -282,7 +230,7 @@ impl GumbelSelfPlayBatch {
             .map(Vec::from)
             .collect();
         let root_policy_logits = policy_logits.clone();
-        let mut adapter = OnnxGumbelEvaluator::new(&mut evaluator);
+        let mut adapter = OnnxGumbelEvaluator::new(evaluator);
         let results = self.search_active_with_evaluator(
             policy_logits,
             true,
@@ -293,22 +241,21 @@ impl GumbelSelfPlayBatch {
         Ok((results, root_policy_logits))
     }
 
-    #[pyo3(signature = (evaluator, root_logit_game_indexes, leaf_batch_size = 16))]
     pub fn search_active_with_onnx_evaluator_and_selected_root_logits(
         &mut self,
-        mut evaluator: PyRefMut<'_, OnnxEvaluator>,
+        evaluator: &mut OnnxEvaluator,
         root_logit_game_indexes: Vec<usize>,
         leaf_batch_size: usize,
-    ) -> PyResult<SearchActiveWithRootLogits> {
+    ) -> Result<SearchActiveWithRootLogits, GumbelError> {
         if leaf_batch_size == 0 {
-            return Err(PyValueError::new_err("leaf_batch_size must be positive"));
+            return Err(GumbelError::message("leaf_batch_size must be positive"));
         }
         let active_indexes = self.active_indexes();
         let active_request = self.active_eval_request_features();
         evaluator.set_gumbel_root_profile_context(active_request.len());
         let root_output = evaluator
             .evaluate_request(&active_request)
-            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+            .map_err(|err| GumbelError::message(err.to_string()))?;
         let root_policy_logits = selected_root_policy_logits(
             &active_indexes,
             &root_output.policy_logits,
@@ -320,7 +267,7 @@ impl GumbelSelfPlayBatch {
             .into_iter()
             .map(Vec::from)
             .collect();
-        let mut adapter = OnnxGumbelEvaluator::new(&mut evaluator);
+        let mut adapter = OnnxGumbelEvaluator::new(evaluator);
         let results = self.search_active_with_evaluator(
             policy_logits,
             true,
@@ -331,19 +278,18 @@ impl GumbelSelfPlayBatch {
         Ok((results, root_policy_logits))
     }
 
-    #[pyo3(signature = (raw_evaluator, ema_evaluator, raw_players, leaf_batch_size = 16))]
     pub fn search_active_with_onnx_raw_ema_evaluators_and_root_logits(
         &mut self,
-        mut raw_evaluator: PyRefMut<'_, OnnxEvaluator>,
-        mut ema_evaluator: PyRefMut<'_, OnnxEvaluator>,
+        raw_evaluator: &mut OnnxEvaluator,
+        ema_evaluator: &mut OnnxEvaluator,
         raw_players: Vec<u8>,
         leaf_batch_size: usize,
-    ) -> PyResult<SearchActiveWithRootLogits> {
+    ) -> Result<SearchActiveWithRootLogits, GumbelError> {
         if leaf_batch_size == 0 {
-            return Err(PyValueError::new_err("leaf_batch_size must be positive"));
+            return Err(GumbelError::message("leaf_batch_size must be positive"));
         }
         if raw_players.len() != self.states.len() {
-            return Err(PyValueError::new_err(format!(
+            return Err(GumbelError::message(format!(
                 "expected {} raw player slots, got {}",
                 self.states.len(),
                 raw_players.len()
@@ -355,8 +301,8 @@ impl GumbelSelfPlayBatch {
             .map(|index| self.states[*index].clone())
             .collect::<Vec<_>>();
         let root_eval = evaluate_raw_ema_rows(
-            &mut raw_evaluator,
-            &mut ema_evaluator,
+            raw_evaluator,
+            ema_evaluator,
             active_states,
             active_indexes.clone(),
             &raw_players,
@@ -375,7 +321,7 @@ impl GumbelSelfPlayBatch {
             .map(Vec::from)
             .collect::<Vec<_>>();
         let mut adapter =
-            OnnxRawEmaGumbelEvaluator::new(&mut raw_evaluator, &mut ema_evaluator, raw_players);
+            OnnxRawEmaGumbelEvaluator::new(raw_evaluator, ema_evaluator, raw_players);
         let results = self.search_active_with_evaluator(
             root_rows,
             true,
@@ -386,26 +332,19 @@ impl GumbelSelfPlayBatch {
         Ok((results, root_policy_logits))
     }
 
-    #[pyo3(signature = (
-        raw_evaluator,
-        ema_evaluator,
-        raw_players,
-        root_logit_game_indexes,
-        leaf_batch_size = 16
-    ))]
     pub fn search_active_with_onnx_raw_ema_evaluators_and_selected_root_logits(
         &mut self,
-        mut raw_evaluator: PyRefMut<'_, OnnxEvaluator>,
-        mut ema_evaluator: PyRefMut<'_, OnnxEvaluator>,
+        raw_evaluator: &mut OnnxEvaluator,
+        ema_evaluator: &mut OnnxEvaluator,
         raw_players: Vec<u8>,
         root_logit_game_indexes: Vec<usize>,
         leaf_batch_size: usize,
-    ) -> PyResult<SearchActiveWithRootLogits> {
+    ) -> Result<SearchActiveWithRootLogits, GumbelError> {
         if leaf_batch_size == 0 {
-            return Err(PyValueError::new_err("leaf_batch_size must be positive"));
+            return Err(GumbelError::message("leaf_batch_size must be positive"));
         }
         if raw_players.len() != self.states.len() {
-            return Err(PyValueError::new_err(format!(
+            return Err(GumbelError::message(format!(
                 "expected {} raw player slots, got {}",
                 self.states.len(),
                 raw_players.len()
@@ -417,8 +356,8 @@ impl GumbelSelfPlayBatch {
             .map(|index| self.states[*index].clone())
             .collect::<Vec<_>>();
         let root_eval = evaluate_raw_ema_rows(
-            &mut raw_evaluator,
-            &mut ema_evaluator,
+            raw_evaluator,
+            ema_evaluator,
             active_states,
             active_indexes.clone(),
             &raw_players,
@@ -437,7 +376,7 @@ impl GumbelSelfPlayBatch {
             .map(Vec::from)
             .collect::<Vec<_>>();
         let mut adapter =
-            OnnxRawEmaGumbelEvaluator::new(&mut raw_evaluator, &mut ema_evaluator, raw_players);
+            OnnxRawEmaGumbelEvaluator::new(raw_evaluator, ema_evaluator, raw_players);
         let results = self.search_active_with_evaluator(
             root_rows,
             true,
@@ -451,34 +390,14 @@ impl GumbelSelfPlayBatch {
     pub fn search_active_with_priors(
         &mut self,
         priors: Vec<Vec<f32>>,
-    ) -> PyResult<Vec<Option<GumbelResult>>> {
+    ) -> Result<Vec<Option<GumbelResult>>, GumbelError> {
         self.search_active(priors, false)
     }
 
-    #[pyo3(signature = (priors, evaluator, root_values, leaf_batch_size = 16))]
-    pub fn search_active_with_priors_and_evaluator(
-        &mut self,
-        priors: Vec<Vec<f32>>,
-        evaluator: &Bound<'_, PyAny>,
-        root_values: Vec<f32>,
-        leaf_batch_size: usize,
-    ) -> PyResult<Vec<Option<GumbelResult>>> {
-        if leaf_batch_size == 0 {
-            return Err(PyValueError::new_err("leaf_batch_size must be positive"));
-        }
-        let mut evaluator = PythonGumbelEvaluator::new(evaluator);
-        self.search_active_with_evaluator(
-            priors,
-            false,
-            &mut evaluator,
-            leaf_batch_size,
-            &root_values,
-        )
-    }
 
-    pub fn apply_actions(&mut self, actions: Vec<Option<usize>>) -> PyResult<Vec<Option<u8>>> {
+    pub fn apply_actions(&mut self, actions: Vec<Option<usize>>) -> Result<Vec<Option<u8>>, GumbelError> {
         if actions.len() != self.states.len() {
-            return Err(PyValueError::new_err(format!(
+            return Err(GumbelError::message(format!(
                 "expected {} action slots, got {}",
                 self.states.len(),
                 actions.len()
@@ -492,19 +411,19 @@ impl GumbelSelfPlayBatch {
                 continue;
             };
             let action = Action::from_index(action_index).ok_or_else(|| {
-                PyValueError::new_err(format!("invalid action index: {action_index}"))
+                GumbelError::message(format!("invalid action index: {action_index}"))
             })?;
             let outcome = self.states[game_index]
                 .apply(action)
-                .map_err(|err| PyValueError::new_err(format!("invalid action: {err:?}")))?;
+                .map_err(|err| GumbelError::message(format!("invalid action: {err:?}")))?;
             outcomes.push(outcome.map(|outcome| outcome.winner as u8));
         }
         Ok(outcomes)
     }
 
-    pub fn set_simulations(&mut self, simulations: Vec<Option<u32>>) -> PyResult<()> {
+    pub fn set_simulations(&mut self, simulations: Vec<Option<u32>>) -> Result<(), GumbelError> {
         if simulations.len() != self.searches.len() {
-            return Err(PyValueError::new_err(format!(
+            return Err(GumbelError::message(format!(
                 "expected {} simulation slots, got {}",
                 self.searches.len(),
                 simulations.len()
@@ -522,9 +441,9 @@ impl GumbelSelfPlayBatch {
     pub fn set_max_considered_actions(
         &mut self,
         max_considered_actions: Vec<Option<usize>>,
-    ) -> PyResult<()> {
+    ) -> Result<(), GumbelError> {
         if max_considered_actions.len() != self.searches.len() {
-            return Err(PyValueError::new_err(format!(
+            return Err(GumbelError::message(format!(
                 "expected {} max_considered_actions slots, got {}",
                 self.searches.len(),
                 max_considered_actions.len()
@@ -543,9 +462,9 @@ impl GumbelSelfPlayBatch {
         Ok(())
     }
 
-    pub fn set_seeds(&mut self, seeds: Vec<Option<u64>>) -> PyResult<()> {
+    pub fn set_seeds(&mut self, seeds: Vec<Option<u64>>) -> Result<(), GumbelError> {
         if seeds.len() != self.searches.len() {
-            return Err(PyValueError::new_err(format!(
+            return Err(GumbelError::message(format!(
                 "expected {} seed slots, got {}",
                 self.searches.len(),
                 seeds.len()
@@ -580,7 +499,7 @@ impl GumbelSelfPlayBatch {
     fn new_from_action_histories(
         action_histories: Vec<Vec<usize>>,
         config: GumbelConfig,
-    ) -> PyResult<Self> {
+    ) -> Result<Self, GumbelError> {
         let game_count = action_histories.len();
         let mut batch = Self::new(game_count, config);
         batch
@@ -608,7 +527,7 @@ impl GumbelSelfPlayBatch {
                 }
                 Ok::<(), String>(())
             })
-            .map_err(PyValueError::new_err)?;
+            .map_err(GumbelError::message)?;
         Ok(batch)
     }
 
@@ -633,10 +552,10 @@ impl GumbelSelfPlayBatch {
         &mut self,
         rows: Vec<Vec<f32>>,
         logits: bool,
-    ) -> PyResult<Vec<Option<GumbelResult>>> {
+    ) -> Result<Vec<Option<GumbelResult>>, GumbelError> {
         let active_indexes = self.active_indexes();
         if rows.len() != active_indexes.len() {
-            return Err(PyValueError::new_err(format!(
+            return Err(GumbelError::message(format!(
                 "expected {} policy rows for active games, got {}",
                 active_indexes.len(),
                 rows.len()
@@ -646,29 +565,29 @@ impl GumbelSelfPlayBatch {
         let mut results = vec![None; self.states.len()];
         for (game_index, row) in active_indexes.into_iter().zip(rows.into_iter()) {
             if row.len() != ACTION_SPACE {
-                return Err(PyValueError::new_err(format!(
+                return Err(GumbelError::message(format!(
                     "expected {ACTION_SPACE} policy values for game {game_index}, got {}",
                     row.len()
                 )));
             }
             let result = if logits {
-                self.searches[game_index].search_with_logits(&self.states[game_index], row)?
+                self.searches[game_index].search_with_logits(&self.states[game_index], &row)?
             } else {
-                self.searches[game_index].search_with_priors(&self.states[game_index], row)?
+                self.searches[game_index].search_with_priors(&self.states[game_index], &row)?
             };
             results[game_index] = Some(result);
         }
         Ok(results)
     }
 
-    fn search_active_with_evaluator(
+    pub fn search_active_with_evaluator(
         &mut self,
         rows: Vec<Vec<f32>>,
         logits: bool,
         evaluator: &mut impl GumbelEvaluator,
         leaf_batch_size: usize,
         root_values: &[f32],
-    ) -> PyResult<Vec<Option<GumbelResult>>> {
+    ) -> Result<Vec<Option<GumbelResult>>, GumbelError> {
         let profile = GumbelBatchProfile::new(if logits {
             "search_active_with_logits_and_evaluator"
         } else {
@@ -676,21 +595,21 @@ impl GumbelSelfPlayBatch {
         });
         let active_indexes = self.active_indexes();
         if rows.len() != active_indexes.len() {
-            return Err(PyValueError::new_err(format!(
+            return Err(GumbelError::message(format!(
                 "expected {} policy rows for active games, got {}",
                 active_indexes.len(),
                 rows.len()
             )));
         }
         if root_values.len() != active_indexes.len() {
-            return Err(PyValueError::new_err(format!(
+            return Err(GumbelError::message(format!(
                 "expected {} root values for active games, got {}",
                 active_indexes.len(),
                 root_values.len()
             )));
         }
         if root_values.iter().any(|value| !value.is_finite()) {
-            return Err(PyValueError::new_err(
+            return Err(GumbelError::message(
                 "root values must be finite for active games",
             ));
         }
@@ -707,7 +626,7 @@ impl GumbelSelfPlayBatch {
             .enumerate()
         {
             if row.len() != ACTION_SPACE {
-                return Err(PyValueError::new_err(format!(
+                return Err(GumbelError::message(format!(
                     "expected {ACTION_SPACE} policy values for game {game_index}, got {}",
                     row.len()
                 )));
@@ -941,7 +860,7 @@ impl GumbelSelfPlayBatch {
                     Ok::<(), String>(())
                 })
                 .map_err(|err| {
-                    PyValueError::new_err(format!("failed to expand Gumbel evaluation: {err}"))
+                    GumbelError::message(format!("failed to expand Gumbel evaluation: {err}"))
                 })?;
             profile.wave(GumbelBatchWaveProfile {
                 wave,
@@ -973,9 +892,9 @@ fn selected_root_policy_logits(
     active_indexes: &[usize],
     policy_logits: &[[f32; ACTION_SPACE]],
     selected_game_indexes: &[usize],
-) -> PyResult<Vec<Vec<f32>>> {
+) -> Result<Vec<Vec<f32>>, GumbelError> {
     if policy_logits.len() != active_indexes.len() {
-        return Err(PyRuntimeError::new_err(
+        return Err(GumbelError::message(
             "root policy logits row count does not match active games",
         ));
     }
@@ -986,7 +905,7 @@ fn selected_root_policy_logits(
                 .iter()
                 .position(|active_index| active_index == selected_index)
                 .ok_or_else(|| {
-                    PyValueError::new_err(format!(
+                    GumbelError::message(format!(
                         "root logit game index is not active: {selected_index}"
                     ))
                 })?;
@@ -1050,7 +969,7 @@ impl GumbelEvaluator for OnnxRawEmaGumbelEvaluator<'_> {
         self.active_games = active_games;
     }
 
-    fn evaluate(&mut self, request: EvalRequest) -> PyResult<GumbelEvalBatch> {
+    fn evaluate(&mut self, request: EvalRequest) -> Result<GumbelEvalBatch, GumbelError> {
         let game_indexes = request.game_indexes();
         evaluate_raw_ema_rows(
             self.raw,
@@ -1072,9 +991,9 @@ fn evaluate_raw_ema_rows(
     raw_players: &[u8],
     active_games: usize,
     wave: u64,
-) -> PyResult<GumbelEvalBatch> {
+) -> Result<GumbelEvalBatch, GumbelError> {
     if states.len() != game_indexes.len() {
-        return Err(PyValueError::new_err(
+        return Err(GumbelError::message(
             "raw/ema ONNX state and game index counts must match",
         ));
     }
@@ -1085,7 +1004,7 @@ fn evaluate_raw_ema_rows(
     let mut ema_states = Vec::new();
     for (row, (state, game_index)) in states.into_iter().zip(game_indexes.into_iter()).enumerate() {
         let Some(raw_player) = raw_players.get(game_index).copied() else {
-            return Err(PyValueError::new_err(format!(
+            return Err(GumbelError::message(format!(
                 "raw/ema ONNX game index out of range: {game_index}"
             )));
         };
@@ -1099,7 +1018,7 @@ fn evaluate_raw_ema_rows(
                 ema_states.push(state);
             }
             player => {
-                return Err(PyValueError::new_err(format!(
+                return Err(GumbelError::message(format!(
                     "invalid self-play current player: {player}"
                 )));
             }
@@ -1131,18 +1050,18 @@ fn evaluate_raw_ema_rows(
             .into_iter()
             .map(|row| {
                 row.ok_or_else(|| {
-                    PyRuntimeError::new_err("raw/ema ONNX evaluation missed a policy row")
+                    GumbelError::message("raw/ema ONNX evaluation missed a policy row")
                 })
             })
-            .collect::<PyResult<Vec<_>>>()?,
+            .collect::<Result<Vec<_>, GumbelError>>()?,
         values
             .into_iter()
             .map(|value| {
                 value.ok_or_else(|| {
-                    PyRuntimeError::new_err("raw/ema ONNX evaluation missed a value row")
+                    GumbelError::message("raw/ema ONNX evaluation missed a value row")
                 })
             })
-            .collect::<PyResult<Vec<_>>>()?,
+            .collect::<Result<Vec<_>, GumbelError>>()?,
     ))
 }
 
@@ -1154,7 +1073,7 @@ fn fill_raw_ema_onnx_rows(
     values: &mut [Option<f32>],
     active_games: usize,
     wave: u64,
-) -> PyResult<()> {
+) -> Result<(), GumbelError> {
     if states.is_empty() {
         return Ok(());
     }
@@ -1165,7 +1084,7 @@ fn fill_raw_ema_onnx_rows(
     }
     let output = evaluator
         .evaluate_request(&EvalRequest::new_with_precomputed_features(states))
-        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+        .map_err(|err| GumbelError::message(err.to_string()))?;
     assign_raw_ema_onnx_output(output, rows, policies, values)
 }
 
@@ -1174,9 +1093,9 @@ fn assign_raw_ema_onnx_output(
     rows: Vec<usize>,
     policies: &mut [Option<[f32; ACTION_SPACE]>],
     values: &mut [Option<f32>],
-) -> PyResult<()> {
+) -> Result<(), GumbelError> {
     if output.policy_logits.len() != rows.len() || output.values.len() != rows.len() {
-        return Err(PyRuntimeError::new_err(
+        return Err(GumbelError::message(
             "raw/ema ONNX output row count mismatch",
         ));
     }
@@ -1187,7 +1106,7 @@ fn assign_raw_ema_onnx_output(
             .zip(output.values.into_iter()),
     ) {
         if row >= policies.len() || row >= values.len() {
-            return Err(PyRuntimeError::new_err(format!(
+            return Err(GumbelError::message(format!(
                 "raw/ema ONNX output row out of range: {row}"
             )));
         }
@@ -1199,14 +1118,13 @@ fn assign_raw_ema_onnx_output(
 
 #[cfg(test)]
 mod tests {
-    use pyo3::PyResult;
-
     use super::GumbelSelfPlayBatch;
     use crate::{
-        eval_request::EvalRequest,
-        game::ACTION_SPACE,
-        gumbel::{config::GumbelConfig, evaluator::GumbelEvaluator, search::GumbelEvalBatch},
+        config::GumbelConfig, error::GumbelError, evaluator::GumbelEvaluator,
+        search::GumbelEvalBatch,
     };
+    use great_kingdom_engine::game::ACTION_SPACE;
+    use great_kingdom_features::EvalRequest;
 
     #[test]
     fn new_offsets_search_seed_per_game() {
@@ -1263,7 +1181,7 @@ mod tests {
     }
 
     impl GumbelEvaluator for FakeEvaluator {
-        fn evaluate(&mut self, request: EvalRequest) -> PyResult<GumbelEvalBatch> {
+        fn evaluate(&mut self, request: EvalRequest) -> Result<GumbelEvalBatch, GumbelError> {
             self.max_request_len = self.max_request_len.max(request.len());
             let mut rows = Vec::with_capacity(request.len());
             for _ in 0..request.len() {

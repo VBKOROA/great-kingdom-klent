@@ -1,8 +1,7 @@
 //! Improved policy target helpers for the Gumbel search backend.
 
-use pyo3::{PyResult, exceptions::PyValueError};
-
-use crate::game::ACTION_SPACE;
+use crate::error::GumbelError;
+use great_kingdom_engine::game::ACTION_SPACE;
 
 use super::{
     node::GumbelNode,
@@ -20,7 +19,7 @@ pub(crate) struct RootImprovedPolicy {
 pub(crate) fn log_priors_from_logits(
     legal_actions: &[usize],
     logits: &[f32],
-) -> PyResult<[f32; ACTION_SPACE]> {
+) -> Result<[f32; ACTION_SPACE], GumbelError> {
     validate_policy_len(logits, "policy_logits")?;
     validate_legal_values(legal_actions, logits, "policy_logits")?;
 
@@ -48,13 +47,13 @@ pub(crate) fn log_priors_from_logits(
 pub(crate) fn log_priors_from_priors(
     legal_actions: &[usize],
     priors: &[f32],
-) -> PyResult<[f32; ACTION_SPACE]> {
+) -> Result<[f32; ACTION_SPACE], GumbelError> {
     validate_policy_len(priors, "prior")?;
     if priors
         .iter()
         .any(|prior| !prior.is_finite() || *prior < 0.0)
     {
-        return Err(PyValueError::new_err(
+        return Err(GumbelError::message(
             "prior values must be finite non-negative values",
         ));
     }
@@ -231,9 +230,9 @@ pub(crate) fn root_search_value(
     value.clamp(-1.0, 1.0)
 }
 
-fn validate_policy_len(row: &[f32], name: &str) -> PyResult<()> {
+fn validate_policy_len(row: &[f32], name: &str) -> Result<(), GumbelError> {
     if row.len() != ACTION_SPACE {
-        return Err(PyValueError::new_err(format!(
+        return Err(GumbelError::message(format!(
             "expected {ACTION_SPACE} {name} values, got {}",
             row.len()
         )));
@@ -241,9 +240,9 @@ fn validate_policy_len(row: &[f32], name: &str) -> PyResult<()> {
     Ok(())
 }
 
-fn validate_legal_values(legal_actions: &[usize], row: &[f32], name: &str) -> PyResult<()> {
+fn validate_legal_values(legal_actions: &[usize], row: &[f32], name: &str) -> Result<(), GumbelError> {
     if legal_actions.iter().any(|action| !row[*action].is_finite()) {
-        return Err(PyValueError::new_err(format!(
+        return Err(GumbelError::message(format!(
             "{name} values for legal actions must be finite"
         )));
     }
@@ -257,12 +256,10 @@ mod tests {
         root_search_value, root_selected_action,
     };
     use crate::{
-        game::{ACTION_SPACE, CENTER_INDEX, GameState},
-        gumbel::{
-            node::GumbelNode,
-            sampling::{RootCandidate, softmax_candidates},
-        },
+        node::GumbelNode,
+        sampling::{RootCandidate, softmax_candidates},
     };
+    use great_kingdom_engine::game::{ACTION_SPACE, CENTER_INDEX, GameState};
     use pretty_assertions::assert_eq;
 
     fn assert_close(left: f32, right: f32) {

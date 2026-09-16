@@ -1,10 +1,13 @@
-use pyo3::{exceptions::PyRuntimeError, prelude::*};
+use great_kingdom_features::EvalRequest;
+use great_kingdom_onnx::OnnxEvaluator;
 
-use super::search::{GumbelEvalBatch, parse_gumbel_eval_response};
-use crate::{eval_request::EvalRequest, onnx::OnnxEvaluator};
+use super::search::GumbelEvalBatch;
+use crate::error::GumbelError;
 
-pub(crate) trait GumbelEvaluator {
-    fn check_signals(&self) -> PyResult<()> {
+/// Abstraction over a leaf evaluator (ONNX Runtime or a host-provided
+/// callback) used by the batched Gumbel search.
+pub trait GumbelEvaluator {
+    fn check_signals(&self) -> Result<(), GumbelError> {
         Ok(())
     }
 
@@ -18,28 +21,7 @@ pub(crate) trait GumbelEvaluator {
 
     fn set_batch_profile_context(&mut self, _wave: u64, _active_games: usize, _leaves: usize) {}
 
-    fn evaluate(&mut self, request: EvalRequest) -> PyResult<GumbelEvalBatch>;
-}
-
-pub(crate) struct PythonGumbelEvaluator<'a, 'py> {
-    callback: &'a Bound<'py, PyAny>,
-}
-
-impl<'a, 'py> PythonGumbelEvaluator<'a, 'py> {
-    pub(crate) const fn new(callback: &'a Bound<'py, PyAny>) -> Self {
-        Self { callback }
-    }
-}
-
-impl GumbelEvaluator for PythonGumbelEvaluator<'_, '_> {
-    fn check_signals(&self) -> PyResult<()> {
-        self.callback.py().check_signals()
-    }
-
-    fn evaluate(&mut self, request: EvalRequest) -> PyResult<GumbelEvalBatch> {
-        let response = self.callback.call1((request,))?;
-        parse_gumbel_eval_response(&response)
-    }
+    fn evaluate(&mut self, request: EvalRequest) -> Result<GumbelEvalBatch, GumbelError>;
 }
 
 pub(crate) struct OnnxGumbelEvaluator<'a> {
@@ -47,7 +29,7 @@ pub(crate) struct OnnxGumbelEvaluator<'a> {
 }
 
 impl<'a> OnnxGumbelEvaluator<'a> {
-    pub(crate) fn new(evaluator: &'a mut OnnxEvaluator) -> Self {
+    pub(crate) const fn new(evaluator: &'a mut OnnxEvaluator) -> Self {
         Self { evaluator }
     }
 }
@@ -62,11 +44,8 @@ impl GumbelEvaluator for OnnxGumbelEvaluator<'_> {
             .set_gumbel_leaf_profile_context(wave, active_games, leaves);
     }
 
-    fn evaluate(&mut self, request: EvalRequest) -> PyResult<GumbelEvalBatch> {
-        let output = self
-            .evaluator
-            .evaluate_request(&request)
-            .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
+    fn evaluate(&mut self, request: EvalRequest) -> Result<GumbelEvalBatch, GumbelError> {
+        let output = self.evaluator.evaluate_request(&request)?;
         Ok(GumbelEvalBatch::new(output.policy_logits, output.values))
     }
 }

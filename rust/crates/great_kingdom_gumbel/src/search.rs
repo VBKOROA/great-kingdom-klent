@@ -3,7 +3,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use pyo3::{buffer::PyBuffer, exceptions::PyValueError, prelude::*};
 
 use super::{
     config::GumbelConfig,
@@ -16,15 +15,14 @@ use super::{
     sampling::{RootCandidate, sample_root_candidates},
     sequential_halving::RootSequentialHalving,
 };
-use crate::{
-    eval_request::EvalRequest,
-    game::{ACTION_SPACE, GameOutcome, GameState, Player},
-};
+use great_kingdom_engine::game::{ACTION_SPACE, GameOutcome, GameState, Player};
+use great_kingdom_features::EvalRequest;
 
-#[pyclass]
+use crate::error::GumbelError;
+
 #[derive(Clone, Debug)]
 pub struct GumbelSearch {
-    pub(crate) config: GumbelConfig,
+    pub config: GumbelConfig,
     pub(crate) nodes: Vec<GumbelNode>,
     root_search_count: u64,
 }
@@ -39,46 +37,103 @@ impl GumbelSearch {
         }
     }
 
-    pub(crate) fn next_root_seed(&mut self) -> u64 {
+    pub fn next_root_seed(&mut self) -> u64 {
         let seed = self.config.seed.wrapping_add(self.root_search_count);
         self.root_search_count = self.root_search_count.wrapping_add(1);
         seed
     }
 
-    pub(crate) fn reset_root_search_count(&mut self) {
+    pub fn reset_root_search_count(&mut self) {
         self.root_search_count = 0;
     }
 
-    pub(crate) fn result_from_logits(
+    #[must_use]
+    pub fn seed(&self) -> u64 {
+        self.config.seed
+    }
+
+    pub fn set_simulations(&mut self, simulations: u32) -> Result<(), GumbelError> {
+        if simulations == 0 {
+            return Err(GumbelError::message("simulations must be positive"));
+        }
+        self.config.simulations = simulations;
+        Ok(())
+    }
+
+    pub fn set_max_considered_actions(
+        &mut self,
+        max_considered_actions: usize,
+    ) -> Result<(), GumbelError> {
+        if max_considered_actions == 0 {
+            return Err(GumbelError::message(
+                "max_considered_actions must be positive",
+            ));
+        }
+        self.config.max_considered_actions = max_considered_actions;
+        Ok(())
+    }
+
+    pub fn set_seed(&mut self, seed: u64) {
+        self.config.seed = seed;
+        self.reset_root_search_count();
+    }
+
+    pub fn set_gumbel_scale(&mut self, gumbel_scale: f32) -> Result<(), GumbelError> {
+        if !gumbel_scale.is_finite() || gumbel_scale < 0.0 {
+            return Err(GumbelError::message(
+                "gumbel_scale must be a finite non-negative value",
+            ));
+        }
+        self.config.gumbel_scale = gumbel_scale;
+        Ok(())
+    }
+
+    pub fn search_with_logits(
+        &mut self,
+        state: &GameState,
+        policy_logits: &[f32],
+    ) -> Result<GumbelResult, GumbelError> {
+        self.result_from_logits(state, policy_logits)
+    }
+
+    pub fn search_with_priors(
+        &mut self,
+        state: &GameState,
+        priors: &[f32],
+    ) -> Result<GumbelResult, GumbelError> {
+        self.result_from_priors(state, priors)
+    }
+
+    pub fn result_from_logits(
         &mut self,
         state: &GameState,
         logits: &[f32],
-    ) -> PyResult<GumbelResult> {
+    ) -> Result<GumbelResult, GumbelError> {
         let legal_actions = state.legal_action_indexes();
         let log_priors = log_priors_from_logits(&legal_actions, logits)?;
         Ok(self.result_from_log_priors(state, &legal_actions, &log_priors))
     }
 
-    pub(crate) fn result_from_priors(
+    pub fn result_from_priors(
         &mut self,
         state: &GameState,
         priors: &[f32],
-    ) -> PyResult<GumbelResult> {
+    ) -> Result<GumbelResult, GumbelError> {
         let legal_actions = state.legal_action_indexes();
         let log_priors = log_priors_from_priors(&legal_actions, priors)?;
         Ok(self.result_from_log_priors(state, &legal_actions, &log_priors))
     }
 
-    pub(crate) fn result_from_logits_with_evaluator<F>(
+    pub fn result_from_logits_with_evaluator<F>(
         &mut self,
         state: &GameState,
         logits: &[f32],
         leaf_batch_size: usize,
         root_value: f32,
         evaluator: F,
-    ) -> PyResult<GumbelResult>
+    ) -> Result<GumbelResult, GumbelError>
     where
-        F: FnMut(EvalRequest) -> PyResult<GumbelEvalBatch>,
+        F: FnMut(EvalRequest) -> Result<GumbelEvalBatch, GumbelError>,
     {
         let legal_actions = state.legal_action_indexes();
         let log_priors = log_priors_from_logits(&legal_actions, logits)?;
@@ -93,16 +148,16 @@ impl GumbelSearch {
         )
     }
 
-    pub(crate) fn result_from_priors_with_evaluator<F>(
+    pub fn result_from_priors_with_evaluator<F>(
         &mut self,
         state: &GameState,
         priors: &[f32],
         leaf_batch_size: usize,
         root_value: f32,
         evaluator: F,
-    ) -> PyResult<GumbelResult>
+    ) -> Result<GumbelResult, GumbelError>
     where
-        F: FnMut(EvalRequest) -> PyResult<GumbelEvalBatch>,
+        F: FnMut(EvalRequest) -> Result<GumbelEvalBatch, GumbelError>,
     {
         let legal_actions = state.legal_action_indexes();
         let log_priors = log_priors_from_priors(&legal_actions, priors)?;
@@ -153,9 +208,9 @@ impl GumbelSearch {
         root_value: f32,
         evaluator: F,
         evaluator_returns_logits: bool,
-    ) -> PyResult<GumbelResult>
+    ) -> Result<GumbelResult, GumbelError>
     where
-        F: FnMut(EvalRequest) -> PyResult<GumbelEvalBatch>,
+        F: FnMut(EvalRequest) -> Result<GumbelEvalBatch, GumbelError>,
     {
         if legal_actions.is_empty() || state.is_terminal() {
             return Ok(GumbelResult {
@@ -308,9 +363,9 @@ impl GumbelSearch {
         leaf_batch_size: usize,
         mut evaluator: F,
         evaluator_returns_logits: bool,
-    ) -> PyResult<GumbelResult>
+    ) -> Result<GumbelResult, GumbelError>
     where
-        F: FnMut(EvalRequest) -> PyResult<GumbelEvalBatch>,
+        F: FnMut(EvalRequest) -> Result<GumbelEvalBatch, GumbelError>,
     {
         if candidates.is_empty() {
             return Ok(GumbelResult {
@@ -439,7 +494,7 @@ impl GumbelSearch {
         policy_row: &[f32; ACTION_SPACE],
         value: f32,
         policy_is_logits: bool,
-    ) -> PyResult<usize> {
+    ) -> Result<usize, GumbelError> {
         let legal_actions = state.legal_action_indexes();
         let log_priors = if policy_is_logits {
             log_priors_from_logits(&legal_actions, policy_row)?
@@ -633,20 +688,20 @@ struct PathValue {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct GumbelEvalBatch {
-    pub(crate) policies: Vec<[f32; ACTION_SPACE]>,
-    pub(crate) values: Vec<f32>,
+pub struct GumbelEvalBatch {
+    pub policies: Vec<[f32; ACTION_SPACE]>,
+    pub values: Vec<f32>,
 }
 
 impl GumbelEvalBatch {
     #[must_use]
-    pub(crate) fn new(policies: Vec<[f32; ACTION_SPACE]>, values: Vec<f32>) -> Self {
+    pub fn new(policies: Vec<[f32; ACTION_SPACE]>, values: Vec<f32>) -> Self {
         Self { policies, values }
     }
 
-    pub(crate) fn validate_len(&self, expected: usize) -> PyResult<()> {
+    pub fn validate_len(&self, expected: usize) -> Result<(), GumbelError> {
         if self.policies.len() != expected || self.values.len() != expected {
-            return Err(PyValueError::new_err(format!(
+            return Err(GumbelError::message(format!(
                 "expected {expected} policy/value rows, got {}/{}",
                 self.policies.len(),
                 self.values.len()
@@ -828,96 +883,17 @@ fn value_for_player(outcome: GameOutcome, player: Player) -> f32 {
     if outcome.winner == player { 1.0 } else { -1.0 }
 }
 
-pub(crate) fn parse_gumbel_eval_response(response: &Bound<'_, PyAny>) -> PyResult<GumbelEvalBatch> {
-    if let Ok((policy_obj, value_obj)) = response.extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>()
-    {
-        if let Ok(eval) = parse_gumbel_eval_response_buffers(&policy_obj, &value_obj) {
-            return Ok(eval);
-        }
-    }
-
-    let (policy_rows, values): (Vec<Vec<f32>>, Vec<f32>) = response.extract()?;
-    let mut policies = Vec::with_capacity(policy_rows.len());
-    for (row_index, row) in policy_rows.into_iter().enumerate() {
-        policies.push(parse_gumbel_policy_row(row, row_index)?);
-    }
-    if values.iter().any(|value| !value.is_finite()) {
-        return Err(PyValueError::new_err("values must be finite"));
-    }
-    Ok(GumbelEvalBatch::new(policies, values))
-}
-
-fn parse_gumbel_eval_response_buffers(
-    policy_obj: &Bound<'_, PyAny>,
-    value_obj: &Bound<'_, PyAny>,
-) -> PyResult<GumbelEvalBatch> {
-    let py = policy_obj.py();
-    let policy_buffer = PyBuffer::<f32>::get(policy_obj)?;
-    let value_buffer = PyBuffer::<f32>::get(value_obj)?;
-    if !policy_buffer.is_c_contiguous() || !value_buffer.is_c_contiguous() {
-        return Err(PyValueError::new_err(
-            "policy/value buffers must be C-contiguous float32 arrays",
-        ));
-    }
-    let policy_count = policy_buffer.item_count();
-    if policy_count % ACTION_SPACE != 0 {
-        return Err(PyValueError::new_err(format!(
-            "policy buffer length must be divisible by {ACTION_SPACE}, got {policy_count}",
-        )));
-    }
-    let batch_size = policy_count / ACTION_SPACE;
-    if value_buffer.item_count() != batch_size {
-        return Err(PyValueError::new_err(format!(
-            "expected {batch_size} values, got {}",
-            value_buffer.item_count()
-        )));
-    }
-
-    let policy_values = policy_buffer.to_vec(py)?;
-    let values = value_buffer.to_vec(py)?;
-    let mut policies = Vec::with_capacity(batch_size);
-    for (row_index, row) in policy_values.chunks_exact(ACTION_SPACE).enumerate() {
-        if row.iter().any(|logit| !logit.is_finite()) {
-            return Err(PyValueError::new_err(format!(
-                "policy row {row_index} contains non-finite logits"
-            )));
-        }
-        let mut policy = [0.0; ACTION_SPACE];
-        policy.copy_from_slice(row);
-        policies.push(policy);
-    }
-    if values.iter().any(|value| !value.is_finite()) {
-        return Err(PyValueError::new_err("values must be finite"));
-    }
-    Ok(GumbelEvalBatch::new(policies, values))
-}
-
-fn parse_gumbel_policy_row(row: Vec<f32>, row_index: usize) -> PyResult<[f32; ACTION_SPACE]> {
-    if row.len() != ACTION_SPACE {
-        return Err(PyValueError::new_err(format!(
-            "policy row {row_index} must have length {ACTION_SPACE}, got {}",
-            row.len()
-        )));
-    }
-    if row.iter().any(|logit| !logit.is_finite()) {
-        return Err(PyValueError::new_err("policy logits must be finite"));
-    }
-    let mut policy = [0.0; ACTION_SPACE];
-    policy.copy_from_slice(&row);
-    Ok(policy)
-}
 
 #[cfg(test)]
 mod tests {
     use super::{GumbelEvalBatch, GumbelSearch, backup_path, select_inner_action_index};
     use crate::{
-        eval_request::EvalRequest,
-        game::{
-            ACTION_SPACE, CENTER_INDEX, Cell, FEATURE_CHANNELS, GameState, Player, state_with_board,
-        },
-        gumbel::{config::GumbelConfig, node::GumbelNode, selection::select_inner_action},
+        config::GumbelConfig, error::GumbelError, node::GumbelNode, selection::select_inner_action,
     };
-    use pyo3::PyResult;
+    use great_kingdom_engine::game::{
+        ACTION_SPACE, CENTER_INDEX, Cell, GameState, Player, state_with_board,
+    };
+    use great_kingdom_features::{EvalRequest, FEATURE_CHANNELS};
 
     fn index(row: usize, col: usize) -> usize {
         row * 9 + col
@@ -1115,7 +1091,7 @@ mod tests {
     fn leaf_batch_probe_evaluator(
         request: EvalRequest,
         bad_action: usize,
-    ) -> PyResult<GumbelEvalBatch> {
+    ) -> Result<GumbelEvalBatch, GumbelError> {
         const BOARD_CELLS: usize = 81;
         const OWN_CASTLE_CHANNEL: usize = 0;
         const OPPONENT_CASTLE_CHANNEL: usize = 1;

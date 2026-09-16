@@ -1,6 +1,6 @@
 //! Root Gumbel sampling utilities.
 
-use crate::game::ACTION_SPACE;
+use great_kingdom_engine::game::ACTION_SPACE;
 
 use super::rng::SplitMix64;
 
@@ -72,7 +72,7 @@ pub(crate) fn softmax_candidates(candidates: &[RootCandidate]) -> [f32; ACTION_S
 #[cfg(test)]
 mod tests {
     use super::sample_root_candidates;
-    use crate::game::{ACTION_SPACE, CENTER_INDEX};
+    use great_kingdom_engine::game::{ACTION_SPACE, CENTER_INDEX};
     use std::collections::HashSet;
 
     #[test]

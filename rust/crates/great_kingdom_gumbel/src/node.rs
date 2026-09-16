@@ -1,6 +1,6 @@
 //! Tree node and edge storage for the Gumbel search backend.
 
-use crate::game::{ACTION_SPACE, Action, GameState, Player};
+use great_kingdom_engine::game::{ACTION_SPACE, Action, GameState, Player};
 
 use super::{sampling::RootCandidate, selection::InnerEdgeStats};
 
@@ -176,7 +176,7 @@ fn build_edge_index_by_action(edges: &[GumbelEdge]) -> [u16; ACTION_SPACE] {
 #[cfg(test)]
 mod tests {
     use super::GumbelNode;
-    use crate::game::{ACTION_SPACE, GameState};
+    use great_kingdom_engine::game::{ACTION_SPACE, GameState};
 
     #[test]
     fn expanded_internal_node_stores_legal_edges_with_log_priors() {
