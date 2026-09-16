@@ -652,7 +652,7 @@ impl ArenaLeafEvaluator for OnnxArenaLeafEvaluator<'_> {
                 .into_iter()
                 .map(|row| {
                     row.ok_or_else(|| {
-                        GumbelError::message("arena ONNX evaluation missed a policy row")
+                        GumbelError::runtime("arena ONNX evaluation missed a policy row")
                     })
                 })
                 .collect::<Result<Vec<_>, GumbelError>>()?,
@@ -660,7 +660,7 @@ impl ArenaLeafEvaluator for OnnxArenaLeafEvaluator<'_> {
                 .into_iter()
                 .map(|value| {
                     value.ok_or_else(|| {
-                        GumbelError::message("arena ONNX evaluation missed a value row")
+                        GumbelError::runtime("arena ONNX evaluation missed a value row")
                     })
                 })
                 .collect::<Result<Vec<_>, GumbelError>>()?,
@@ -685,9 +685,7 @@ fn fill_onnx_rows(
     } else {
         evaluator.set_gumbel_leaf_profile_context(wave, active_games, rows.len());
     }
-    let output = evaluator
-        .evaluate_request(&EvalRequest::new_with_precomputed_features(states))
-        .map_err(|err| GumbelError::message(err.to_string()))?;
+    let output = evaluator.evaluate_request(&EvalRequest::new_with_precomputed_features(states))?;
     assign_onnx_output(output, rows, policies, values)
 }
 
@@ -698,7 +696,7 @@ fn assign_onnx_output(
     values: &mut [Option<f32>],
 ) -> Result<(), GumbelError> {
     if output.policy_logits.len() != rows.len() || output.values.len() != rows.len() {
-        return Err(GumbelError::message(
+        return Err(GumbelError::runtime(
             "arena ONNX evaluator returned a mismatched batch size",
         ));
     }

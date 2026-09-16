@@ -894,7 +894,7 @@ fn selected_root_policy_logits(
     selected_game_indexes: &[usize],
 ) -> Result<Vec<Vec<f32>>, GumbelError> {
     if policy_logits.len() != active_indexes.len() {
-        return Err(GumbelError::message(
+        return Err(GumbelError::runtime(
             "root policy logits row count does not match active games",
         ));
     }
@@ -1050,7 +1050,7 @@ fn evaluate_raw_ema_rows(
             .into_iter()
             .map(|row| {
                 row.ok_or_else(|| {
-                    GumbelError::message("raw/ema ONNX evaluation missed a policy row")
+                    GumbelError::runtime("raw/ema ONNX evaluation missed a policy row")
                 })
             })
             .collect::<Result<Vec<_>, GumbelError>>()?,
@@ -1058,7 +1058,7 @@ fn evaluate_raw_ema_rows(
             .into_iter()
             .map(|value| {
                 value.ok_or_else(|| {
-                    GumbelError::message("raw/ema ONNX evaluation missed a value row")
+                    GumbelError::runtime("raw/ema ONNX evaluation missed a value row")
                 })
             })
             .collect::<Result<Vec<_>, GumbelError>>()?,
@@ -1082,9 +1082,7 @@ fn fill_raw_ema_onnx_rows(
     } else {
         evaluator.set_gumbel_leaf_profile_context(wave, active_games, rows.len());
     }
-    let output = evaluator
-        .evaluate_request(&EvalRequest::new_with_precomputed_features(states))
-        .map_err(|err| GumbelError::message(err.to_string()))?;
+    let output = evaluator.evaluate_request(&EvalRequest::new_with_precomputed_features(states))?;
     assign_raw_ema_onnx_output(output, rows, policies, values)
 }
 
@@ -1095,7 +1093,7 @@ fn assign_raw_ema_onnx_output(
     values: &mut [Option<f32>],
 ) -> Result<(), GumbelError> {
     if output.policy_logits.len() != rows.len() || output.values.len() != rows.len() {
-        return Err(GumbelError::message(
+        return Err(GumbelError::runtime(
             "raw/ema ONNX output row count mismatch",
         ));
     }
@@ -1106,7 +1104,7 @@ fn assign_raw_ema_onnx_output(
             .zip(output.values.into_iter()),
     ) {
         if row >= policies.len() || row >= values.len() {
-            return Err(GumbelError::message(format!(
+            return Err(GumbelError::runtime(format!(
                 "raw/ema ONNX output row out of range: {row}"
             )));
         }

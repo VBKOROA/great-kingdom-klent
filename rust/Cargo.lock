@@ -272,7 +272,11 @@ dependencies = [
 name = "great_kingdom_core"
 version = "0.1.0"
 dependencies = [
- "ort",
+ "great_kingdom_engine",
+ "great_kingdom_features",
+ "great_kingdom_gumbel",
+ "great_kingdom_klent",
+ "great_kingdom_onnx",
  "pretty_assertions",
  "pyo3",
  "rayon",

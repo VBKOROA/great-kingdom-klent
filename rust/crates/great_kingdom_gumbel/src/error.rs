@@ -9,7 +9,10 @@ use std::fmt;
 /// can downcast it back to the original error to preserve tracebacks.
 #[derive(Debug)]
 pub enum GumbelError {
+    /// Invalid input or configuration (maps to `ValueError`).
     Message(String),
+    /// Internal runtime failure (maps to `RuntimeError`).
+    Runtime(String),
     External(Box<dyn std::error::Error + Send + Sync>),
 }
 
@@ -17,6 +20,11 @@ impl GumbelError {
     #[must_use]
     pub fn message(message: impl Into<String>) -> Self {
         Self::Message(message.into())
+    }
+
+    #[must_use]
+    pub fn runtime(message: impl Into<String>) -> Self {
+        Self::Runtime(message.into())
     }
 
     #[must_use]
@@ -28,7 +36,7 @@ impl GumbelError {
 impl fmt::Display for GumbelError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Message(message) => formatter.write_str(message),
+            Self::Message(message) | Self::Runtime(message) => formatter.write_str(message),
             Self::External(error) => write!(formatter, "{error}"),
         }
     }

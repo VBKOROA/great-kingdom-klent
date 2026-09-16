@@ -1,22 +1,28 @@
-use pyo3::prelude::*;
+//! `great_kingdom_core` PyO3 facade.
+//!
+//! This crate is the only Python C-extension boundary. It re-exports the
+//! classes, functions, and constants of the pure Rust domain crates under the
+//! unchanged `great_kingdom_core` module while keeping all game, feature, ONNX,
+//! and search logic in dependency-light crates.
 
+mod errors;
 mod eval_request;
-mod features;
 mod game;
 mod gumbel;
 mod klent;
 mod onnx;
-mod rules;
-mod territory;
+mod python_eval;
 
-pub use eval_request::EvalRequest;
-pub use game::{
-    ACTION_SPACE, Action, BOARD_CELLS, BOARD_SIZE, CASTLES_PER_PLAYER, CENTER_INDEX, Cell,
-    FEATURE_CHANNELS, GameEndReason, GameOutcome, GameState, InvalidAction, PASS_ACTION, Player,
-};
-pub use gumbel::{GumbelArenaBatch, GumbelConfig, GumbelResult, GumbelSearch, GumbelSelfPlayBatch};
-pub use klent::{KlentZeroSearchBatch, klent_analytical_policy, klent_masked_state_value};
-pub use onnx::{NetworkOutput, OnnxDevice, OnnxError, OnnxEvaluator, OnnxEvaluatorConfig};
+use pyo3::prelude::*;
+
+use great_kingdom_engine::game::{ACTION_SPACE, BOARD_CELLS, BOARD_SIZE, PASS_ACTION};
+use great_kingdom_features::FEATURE_CHANNELS;
+
+use eval_request::EvalRequest;
+use game::GameState;
+use gumbel::{GumbelArenaBatch, GumbelConfig, GumbelResult, GumbelSearch, GumbelSelfPlayBatch};
+use klent::KlentZeroSearchBatch;
+use onnx::OnnxEvaluator;
 
 #[pyfunction]
 #[must_use]
@@ -43,8 +49,8 @@ fn great_kingdom_core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<KlentZeroSearchBatch>()?;
     module.add_function(wrap_pyfunction!(action_space, module)?)?;
     module.add_function(wrap_pyfunction!(rayon_thread_count, module)?)?;
-    module.add_function(wrap_pyfunction!(klent_analytical_policy, module)?)?;
-    module.add_function(wrap_pyfunction!(klent_masked_state_value, module)?)?;
+    module.add_function(wrap_pyfunction!(klent::klent_analytical_policy, module)?)?;
+    module.add_function(wrap_pyfunction!(klent::klent_masked_state_value, module)?)?;
     module.add("BOARD_SIZE", BOARD_SIZE)?;
     module.add("BOARD_CELLS", BOARD_CELLS)?;
     module.add("PASS_ACTION", PASS_ACTION)?;
