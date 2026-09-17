@@ -590,3 +590,40 @@ GPU 검증에서는 최대 VRAM, 유한 loss, 수집 transition 수, 전체 반�
 검색 없는 평가와 Gumbel Arena의 기력 비교는 별도 평가 단계이며 학습 명령만으로 수행되지 않는다.
 6절은 PyTorch checkpoint 및 ONNX arena 경로를 사용하는 운영 절차다. 실제 학습 모델의 Runpod 대국 결과나
 32/8 대비 32/4의 우위를 검증한 결과를 의미하지 않는다.
+
+## 8. 순수 정책 무탐색 평가
+
+학습된 policy 자체의 기력을 비교하려면 `--action-selection policy`를 사용한다.
+이 경로는 PyTorch backend를 지원하며 KLENT 및 기존 checkpoint를 모두 로드한다.
+합법수 중 **원본 policy logit이 가장 큰 수**를 선택하고 동점은 작은 action index로
+해결한다. 공통 추론에서 Q/value가 계산될 수 있지만 착수에는 사용하지 않는다.
+KLENT의 Q 결합 정책 `pi'`나 Gumbel 탐색을 사용하지 않는다.
+
+```bash
+great-kingdom-evaluate \
+  --candidate /workspace-global/checkpoints/snapshots/training-latest-20260917-100951.pt \
+  --best /workspace-global/checkpoints/snapshots/training-latest-20260917-082900.pt \
+  --backend pytorch --config configs/runpod/policy-arena.yaml \
+  --device cuda \
+  --report data/runpod/klent-arena-pt-v1/policy-100951-vs-082900-seed1000.json
+
+python scripts/analyze_arena_report.py \
+  data/runpod/klent-arena-pt-v1/policy-100951-vs-082900-seed1000.json
+```
+
+- 기본 첫 8턴은 모델과 무관하게 합법수 전체(합법이면 pass 포함)에서 균등 추출한다.
+  `--policy-opening-turns N`으로 조절한다. `N=0`이면 시작부터 policy argmax지만
+  seed를 바꾸거나 판수를 늘려도 같은 대국이 반복될 수 있다.
+- `paired_seeds: true`일 때 같은 seed의 선후공 두 판은 동일한 오프닝을 공유한다.
+  모델이나 batch size를 바꿔도 오프닝은 유지된다. 짝수 판수로 비교한다.
+  오프닝 중 대국이 종료되면 그 결과도 포함되므로 매우 긴 오프닝은 피한다.
+- `seed_start`와 `policy_opening_turns`가 보고서 config에 기록되고 오프닝 착수도
+  moves에 포함된다. 프리셋의 seed는 1000이며 새 표본은 `--seed-start 2000` 등으로 만든다.
+- policy 모드에서는 `gumbel_simulations: 0`을 허용한다. sim=0만으로 모드가
+  자동 변경되지는 않는다. Gumbel 관련 설정은 policy 착수에 영향을 주지 않는다.
+- Python에서 게임 상태를 관리하고 활성 게임을 모델별로 묶어 추론한다.
+  GPU 없는 로컬에서는 `--device cpu --games 2 --batch-size 2`로 실행할 수 있다.
+- 기존 Gumbel arena의 noisy opening과 이 균등 오프닝은 서로 다르다.
+  두 평가의 승률 차이를 Q/value만의 효과로 단정하지 않는다. 두 모드 모두
+  최신/과거 모델의 상대 성능을 보되, 원인 분리는 동일 오프닝 통제 실험이 추가로 필요하다.
+- ONNX backend는 이 모드를 지원하지 않으며 명시적으로 오류를 낸다.

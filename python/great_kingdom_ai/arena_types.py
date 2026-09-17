@@ -83,6 +83,8 @@ class ArenaConfig:
     batch_size: int = 1
     seed_start: int = 0
     max_turns: int = 200
+    action_selection: str = "gumbel"
+    policy_opening_turns: int = 8
     gumbel_simulations: int = 128
     gumbel_max_considered_actions: int = 16
     gumbel_c_visit: float = 50.0
@@ -162,7 +164,14 @@ def validate_arena_config(config: ArenaConfig) -> None:
         raise ValueError("max_turns must be positive")
     if not 0.0 <= config.promotion_threshold <= 1.0:
         raise ValueError("promotion_threshold must be between 0 and 1")
-    if config.gumbel_simulations <= 0:
+    if config.action_selection not in {"gumbel", "policy"}:
+        raise ValueError("action_selection must be gumbel or policy")
+    if config.policy_opening_turns < 0 or config.policy_opening_turns >= config.max_turns:
+        if config.action_selection == "policy":
+            raise ValueError("policy_opening_turns must be non-negative and below max_turns")
+    if config.gumbel_simulations < 0 or (
+        config.action_selection == "gumbel" and config.gumbel_simulations == 0
+    ):
         raise ValueError("gumbel_simulations must be positive")
     if config.gumbel_max_considered_actions <= 0:
         raise ValueError("gumbel_max_considered_actions must be positive")

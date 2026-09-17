@@ -58,6 +58,18 @@ def play_arena_game(
     if candidate_player not in {BLUE, ORANGE}:
         raise ValueError("candidate_player must be 1 or 2")
 
+    if config.action_selection == "policy":
+        from great_kingdom_ai.policy_arena import play_policy_games
+
+        validate_arena_config(config)
+        if search_factory is not None:
+            raise ValueError("policy arena does not use search_factory")
+        return play_policy_games(
+            states=[state if state is not None else runtime.create_game_state()],
+            seeds=[seed], candidate_players=[candidate_player],
+            candidate_model=candidate_model, best_model=best_model,
+            config=config, runtime=runtime,
+        )[0]
     game_state = state if state is not None else runtime.create_game_state()
     searches = (
         {
@@ -140,6 +152,15 @@ def run_arena(
 ) -> ArenaReport:
     config = config if config is not None else ArenaConfig()
     validate_arena_config(config)
+    if config.action_selection == "policy":
+        from great_kingdom_ai.policy_arena import run_policy_arena
+
+        if search_factory is not None:
+            raise ValueError("policy arena does not use search_factory")
+        return run_policy_arena(
+            candidate_model=candidate_model, best_model=best_model, config=config,
+            runtime=runtime, state_factory=state_factory, progress_callback=progress_callback,
+        )
     if config.batch_size > 1:
         if state_factory is not None or search_factory is not None:
             raise ValueError(
@@ -190,6 +211,15 @@ def run_arena_batched(
 ) -> ArenaReport:
     config = config if config is not None else ArenaConfig()
     validate_arena_config(config)
+    if config.action_selection == "policy":
+        from great_kingdom_ai.policy_arena import run_policy_arena
+
+        if onnx_evaluators is not None:
+            raise ValueError("policy arena requires backend=pytorch")
+        return run_policy_arena(
+            candidate_model=candidate_model, best_model=best_model, config=config,
+            runtime=runtime, progress_callback=progress_callback,
+        )
 
     games: list[ArenaGameResult | None] = [None] * config.games
     emitted_games = 0

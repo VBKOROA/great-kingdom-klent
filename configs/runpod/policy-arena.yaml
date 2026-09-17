@@ -1,0 +1,13 @@
+# Pure policy diagnosis: uniform legal openings, then legal policy argmax.
+# PyTorch only; Q/value outputs never affect action selection.
+action_selection: policy
+policy_opening_turns: 8
+gumbel_simulations: 0
+games: 200
+batch_size: 32
+max_turns: 200
+device: cuda
+seed_start: 1000
+paired_seeds: true
+promotion_threshold: 0.5
+require_side_win_rates_for_promotion: true

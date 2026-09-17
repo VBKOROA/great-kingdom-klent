@@ -190,6 +190,8 @@ def test_evaluate_parser_can_override_all_arena_config_fields() -> None:
     config = evaluate_module._config_from_args(args)
 
     assert asdict(config) == {
+        "action_selection": "gumbel",
+        "policy_opening_turns": 8,
         "games": 3,
         "batch_size": 2,
         "seed_start": 11,

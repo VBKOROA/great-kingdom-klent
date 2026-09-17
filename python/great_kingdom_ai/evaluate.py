@@ -241,6 +241,8 @@ def run_arena_onnx(
 ) -> ArenaReport:
     config = config if config is not None else ArenaConfig()
     validate_arena_config(config)
+    if config.action_selection == "policy":
+        raise ValueError("policy arena requires backend=pytorch")
     if config.batch_size <= 1:
         config = ArenaConfig(**{**asdict(config), "batch_size": max(1, config.games)})
     evaluators = ArenaOnnxEvaluators(
@@ -274,6 +276,8 @@ def run_arena_checkpoints_onnx(
     progress_callback: Any | None = None,
 ) -> ArenaReport:
     config = config if config is not None else ArenaConfig()
+    if config.action_selection == "policy":
+        raise ValueError("policy arena requires backend=pytorch")
     with tempfile.TemporaryDirectory(prefix="gka-arena-onnx-") as temp_dir:
         temp_path = Path(temp_dir)
         candidate_onnx = _arena_onnx_path(
@@ -399,6 +403,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--seed-start", type=int, default=None)
     parser.add_argument("--max-turns", type=int, default=None)
+    parser.add_argument("--action-selection", choices=["gumbel", "policy"], default=None,
+                        help="policy: legal policy argmax without search (PyTorch only)")
+    parser.add_argument("--policy-opening-turns", type=int, default=None,
+                        help="policy mode: seeded uniform legal opening moves (default 8)")
     parser.add_argument("--gumbel-simulations", type=int, default=None)
     parser.add_argument(
         "--gumbel-max-considered-actions",
@@ -467,6 +475,8 @@ def _config_from_args(args: argparse.Namespace) -> ArenaConfig:
         "batch_size": args.batch_size,
         "seed_start": args.seed_start,
         "max_turns": args.max_turns,
+        "action_selection": args.action_selection,
+        "policy_opening_turns": args.policy_opening_turns,
         "gumbel_simulations": args.gumbel_simulations,
         "gumbel_max_considered_actions": args.gumbel_max_considered_actions,
         "gumbel_c_visit": args.gumbel_c_visit,
