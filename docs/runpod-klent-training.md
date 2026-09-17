@@ -110,6 +110,15 @@ FP32 비교용이며 CUDA FP16 오차 측정은 별도 검증이 필요하다.
 nvidia-smi -l 5
 ```
 
+CPU와 GPU를 함께 보려면 `bash scripts/monitor.sh 3`으로 3초마다 확인한다.
+`monitor.sh`는 같은 디렉터리의 `monitor_cpu.sh`를 사용한다.
+CPU는 현재 cgroup(v1/v2)의 누적 사용 시간 차이를 실제 경과 시간으로 나눈
+`vCPU busy`와, 보이는 CPU quota·상위 cgroup quota·`nproc` 중 가장 작은 용량 대비
+사용률을 표시한다. 호스트 `/proc/stat`을 Pod 사용량으로 환산하지 않으며,
+cgroup 사용 시간을 읽지 못하면 `측정 불가`를 표시한다.
+컨테이너 밖의 상위 제한은 보이지 않을 수 있고, telemetry의 집계 구간·분모에 따라
+값이 다를 수 있다. RAM은 여전히 `free` 기준이므로 호스트 메모리를 포함할 수 있다.
+
 ```bash
 du -sh data/runpod/klent-smoke-*
 df -h .

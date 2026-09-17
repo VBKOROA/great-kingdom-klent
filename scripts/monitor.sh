@@ -1,74 +1,40 @@
 #!/bin/bash
 INTERVAL=${1:-10}
 
-read_cpu_stat() {
-    read -r _cpu user nice system idle iowait irq softirq steal guest guest_nice _rest < /proc/stat
-    idle_all=$((idle + iowait))
-    total=$((user + nice + system + idle + iowait + irq + softirq + steal + guest + guest_nice))
-    echo "$idle_all $total"
-}
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+source "$SCRIPT_DIR/monitor_cpu.sh"
 
-visible_vcpus() {
-    nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo
-}
+if ! [[ "$INTERVAL" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
+   ! awk -v interval="$INTERVAL" 'BEGIN {exit !(interval > 0)}'; then
+    echo "Usage: bash scripts/monitor.sh [positive interval in seconds]" >&2
+    exit 1
+fi
 
-quota_vcpus() {
-    if [ -r /sys/fs/cgroup/cpu.max ]; then
-        read -r quota period < /sys/fs/cgroup/cpu.max
-        if [ "$quota" != "max" ] && [ "${period:-0}" -gt 0 ] 2>/dev/null; then
-            awk -v quota="$quota" -v period="$period" 'BEGIN { printf "%.2f", quota / period }'
-            return
-        fi
-    fi
-
-    if [ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ] && [ -r /sys/fs/cgroup/cpu/cpu.cfs_period_us ]; then
-        quota=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)
-        period=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
-        if [ "$quota" -gt 0 ] && [ "$period" -gt 0 ] 2>/dev/null; then
-            awk -v quota="$quota" -v period="$period" 'BEGIN { printf "%.2f", quota / period }'
-            return
-        fi
-    fi
-
-    visible_vcpus
-}
-
+init_cpu_monitor
 clear
-read -r prev_idle prev_total < <(read_cpu_stat)
+previous=$(cpu_snapshot 2>/dev/null) || previous=''
 
 while true; do
     sleep "$INTERVAL"
-    read -r idle total < <(read_cpu_stat)
-
-    idle_delta=$((idle - prev_idle))
-    total_delta=$((total - prev_total))
-    prev_idle=$idle
-    prev_total=$total
-
-    visible=$(visible_vcpus)
-    quota=$(quota_vcpus)
-    cpu_line=$(awk \
-        -v idle_delta="$idle_delta" \
-        -v total_delta="$total_delta" \
-        -v visible="$visible" \
-        -v quota="$quota" \
-        'BEGIN {
-            if (total_delta <= 0) {
-                total_pct = 0.0
-            } else {
-                total_pct = 100.0 * (total_delta - idle_delta) / total_delta
-            }
-            busy_vcpus = total_pct * visible / 100.0
-            quota_pct = quota > 0 ? 100.0 * busy_vcpus / quota : total_pct
-            printf "CPU 사용량: %.1f%% total, %.2f/%s vCPU busy, %.1f%% of quota", total_pct, busy_vcpus, quota, quota_pct
-        }')
+    current=$(cpu_snapshot 2>/dev/null) || current=''
+    capacity=$(cpu_capacity 2>/dev/null) || capacity=''
+    cpu_line="CPU 사용량 (cgroup): 측정 불가"
+    if [ -n "$current" ] && [ -n "$capacity" ]; then
+        cpu_line="CPU 사용량 (cgroup): 측정 대기"
+        if [ -n "$previous" ]; then
+            read -r prev_time prev_usage <<< "$previous"
+            read -r current_time current_usage <<< "$current"
+            cpu_line=$(format_cpu_usage "$prev_time" "$prev_usage" "$current_time" "$current_usage" "$capacity")
+        fi
+    fi
+    previous=$current
 
     echo "=== 시스템 모니터링 ($(date +%H:%M:%S)) ==="
     echo "$cpu_line"
 
     # RAM 사용량
     ram_info=$(free -m | awk '/Mem:/ {print $3 "/" $2 " MB"}')
-    echo "RAM 사용량: $ram_info"
+    echo "RAM 사용량 (free 기준, 호스트 포함 가능): $ram_info"
 
     # GPU 정보
     if command -v nvidia-smi >/dev/null 2>&1; then
