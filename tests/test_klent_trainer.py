@@ -820,3 +820,29 @@ def test_resume_false_interrupted_does_not_adopt_legacy_checkpoints(
     assert legacy_iter2.iteration == 2
     assert legacy_iter2.total_steps == 17
     assert legacy_iter2.run_id == ""
+
+def test_resume_lr_override_preserves_adam_state(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    model = create_model('small_klent')
+    optimizer = create_optimizer(torch, model, OptimizerConfig(learning_rate=3e-4))
+    parameter = next(model.parameters())
+    parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+    state = KlentTrainState(model=model, optimizer=optimizer, iteration=7,
+                            total_steps=42, klent_config=KlentConfig(),
+                            model_preset='small_klent')
+    path = save_klent_checkpoint(state, tmp_path / 'source.pt')
+    config = make_config(tmp_path, learning_rate=1e-4)
+    normal = trainer_module._load_state(path, config)
+    assert normal.optimizer.param_groups[0]['lr'] == 3e-4
+    overridden = trainer_module._load_state(path, replace(config, override_learning_rate=True))
+    assert overridden.optimizer.param_groups[0]['lr'] == 1e-4
+    assert overridden.iteration == 7
+    assert overridden.total_steps == 42
+    original_stats = next(iter(optimizer.state.values()))
+    restored_stats = next(iter(overridden.optimizer.state.values()))
+    for key in ('step', 'exp_avg', 'exp_avg_sq'):
+        assert torch.equal(original_stats[key], restored_stats[key])
+    saved = save_klent_checkpoint(overridden, tmp_path / 'next.pt')
+    assert load_klent_checkpoint(saved).optimizer.param_groups[0]['lr'] == 1e-4

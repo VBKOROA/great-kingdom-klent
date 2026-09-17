@@ -627,3 +627,20 @@ python scripts/analyze_arena_report.py \
   두 평가의 승률 차이를 Q/value만의 효과로 단정하지 않는다. 두 모드 모두
   최신/과거 모델의 상대 성능을 보되, 원인 분리는 동일 오프닝 통제 실험이 추가로 필요하다.
 - ONNX backend는 이 모드를 지원하지 않으며 명시적으로 오류를 낸다.
+
+### 기존 work_dir에서 LR override로 재개
+
+학습 프로세스를 Ctrl+C로 중지하고 동일한 YAML에 `--learning-rate`를 추가한다.
+
+```bash
+python -u -m great_kingdom_ai.klent.cli \
+  --config data/runpod/klent-configs/train.yaml --loop --learning-rate 0.0001
+```
+
+이 옵션은 새 학습뿐 아니라 resume의 optimizer 복원 **이후**에도 적용된다.
+모델, Adam moment, scaler, iteration, work_dir는 유지하며 모든 parameter group의
+LR만 변경한다. 최신 복구 후보가 `iteration-*.pt`여도 적용된다.
+옵션을 생략하면 기존대로 checkpoint의 LR을 복원한다.
+다음 완료 checkpoint에 변경된 LR이 저장된다. 그 전에 중단했다면 재실행 때도
+같은 옵션을 지정해야 한다. YAML 자체는 자동 수정하지 않는다.
+YAML에서 지정하려면 `learning_rate: 0.0001`과 `override_learning_rate: true`를 함께 쓴다.

@@ -82,6 +82,7 @@ class KlentTrainConfig:
     actor_onnx_path: Path | None = None
     rust_self_play_batch_size: int = 64
     warm_start_checkpoint: Path | None = None
+    override_learning_rate: bool = False
 
     def __post_init__(self) -> None:
         if self.min_transitions <= 0:
@@ -574,6 +575,9 @@ def _load_state(path: Path, config: KlentTrainConfig) -> KlentTrainState:
     )
     if state.klent_config != config.klent:
         raise ValueError("resume KLENT config does not match the checkpoint")
+    if config.override_learning_rate:
+        for group in state.optimizer.param_groups:
+            group["lr"] = config.learning_rate
     return state
 
 

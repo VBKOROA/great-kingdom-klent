@@ -51,3 +51,20 @@ def test_loop_cli_streams_and_handles_interrupt(monkeypatch: pytest.MonkeyPatch,
     assert '"event": "klent_iteration"' in output
     assert '"iteration": 4' in output
     assert '"event": "klent_stopped"' in output
+
+
+def test_cli_learning_rate_overrides_resume(monkeypatch):
+    monkeypatch.setattr('sys.argv', ['klent', '--config', 'train.yaml',
+                                   '--learning-rate', '0.0001'])
+    monkeypatch.setattr(cli, 'load_klent_train_config', lambda _: trainer.KlentTrainConfig())
+
+    def run(config, *, iterations, resume):
+        assert resume
+        assert config.learning_rate == 0.0001
+        assert config.override_learning_rate
+        return []
+
+    monkeypatch.setattr(cli, 'run_klent_training', run)
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+    assert stopped.value.code == 0

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import NoReturn
 
@@ -17,6 +18,10 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the synchronous KLENT collect/train iteration loop",
     )
     parser.add_argument("--config", type=Path, required=True, help="KLENT YAML config")
+    parser.add_argument(
+        "--learning-rate", type=float, default=None,
+        help="override learning rate, including the restored optimizer on resume",
+    )
     duration = parser.add_mutually_exclusive_group()
     duration.add_argument("--iterations", type=int, default=1, help="total iterations to reach")
     duration.add_argument(
@@ -33,6 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> NoReturn:
     args = build_parser().parse_args()
     config = load_klent_train_config(args.config)
+    if args.learning_rate is not None:
+        config = replace(config, learning_rate=args.learning_rate, override_learning_rate=True)
     if args.loop:
         try:
             for summary in iter_klent_training(config, resume=not args.no_resume):
