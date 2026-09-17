@@ -19,4 +19,5 @@ def test_console_scripts_are_current_entrypoints() -> None:
         "great-kingdom-evaluate": "great_kingdom_ai.evaluate:main",
         "great-kingdom-export-onnx": "great_kingdom_ai.onnx_export:main",
         "great-kingdom-klent": "great_kingdom_ai.klent.cli:main",
+        "great-kingdom-klent-export": "great_kingdom_ai.klent.submission_export:main",
     }
