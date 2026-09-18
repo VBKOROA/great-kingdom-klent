@@ -31,7 +31,7 @@
 source .venv/bin/activate
 python -m great_kingdom_ai.klent.submission_export \
   --checkpoint data/runpod/klent-strong-attn/checkpoints/latest.pt \
-  --output-dir data/submissions/klent-v2
+  --output-dir data/submissions/klent-v1
 ```
 
 패키지를 업데이트하여 설치했다면 `great-kingdom-klent-export` 명령으로도 동일하게 실행할 수 있다.
