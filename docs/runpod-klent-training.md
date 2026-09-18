@@ -651,6 +651,8 @@ FP32 공개가 통과했다. 이는 Runpod의 기본 배치 크기, CUDA AMP/FP1
 GPU 검증에서는 최대 VRAM, 유한 loss, 수집 transition 수, 전체 반복 시간을 기록한다.
 현재 CLI는 epoch metrics와 self-play 지표(3.1절)는 보고하지만 단계별 시간·최대 VRAM은
 자동 보고하지 않는다. 비유한 진단값은 JSON으로 내보내지 않고 예외로 중단한다.
+로컬 pytest에서 확인된 ONNX exporter 관련 deprecation warning의 발생 환경, 영향 및
+후속 대응은 [Known KLENT pytest Warnings](klent-pytest-warnings.md)에 기록한다.
 검색 없는 평가와 Gumbel Arena의 기력 비교는 별도 평가 단계이며 학습 명령만으로 수행되지 않는다.
 6절은 PyTorch checkpoint 및 ONNX arena 경로를 사용하는 운영 절차다. 실제 학습 모델의 Runpod 대국 결과나
 32/8 대비 32/4의 우위를 검증한 결과를 의미하지 않는다.
