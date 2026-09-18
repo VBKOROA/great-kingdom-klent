@@ -250,6 +250,114 @@ def test_klent_soft_target_ce_stays_above_target_entropy() -> None:
     assert float(losses.policy) >= float(entropy) - 1e-6
 
 
+def test_klent_loss_reports_target_entropy_and_policy_kl() -> None:
+    logits = torch.tensor([[1.0, 0.0, -1.0, 0.5]], dtype=torch.float32)
+    q_values = torch.tensor([[0.2, -0.3, 0.4, 0.1]], dtype=torch.float32)
+    model = _ConstantQModel(logits, q_values)
+    policy = torch.tensor(
+        [[0.4, 0.3, 0.2, 0.1], [0.25, 0.25, 0.25, 0.25]],
+        dtype=torch.float32,
+    )
+    batch = _make_batch(4, batch_size=2, values=[0.5, -0.5], actions=[0, 2])
+    batch = TrainingBatch(
+        features=batch.features,
+        policy=policy,
+        value=batch.value,
+        legal_mask=batch.legal_mask,
+        sample_weight=batch.sample_weight,
+        action=batch.action,
+    )
+
+    losses = compute_klent_losses(model, batch, KlentConfig())
+
+    log_policy = torch.log_softmax(logits, dim=1)
+    expected_entropy = -(policy * torch.log(policy.clamp_min(1e-45))).sum(dim=1)
+    expected_ce = -(policy * log_policy).sum(dim=1)
+
+    assert torch.allclose(
+        losses.per_sample_target_entropy,
+        expected_entropy,
+        atol=1e-6,
+    )
+    assert torch.allclose(
+        losses.per_sample_policy_kl,
+        expected_ce - expected_entropy,
+        atol=1e-6,
+    )
+
+
+def test_klent_loss_one_hot_target_entropy_is_zero() -> None:
+    logits = torch.tensor([[0.5, -0.5, 1.0]], dtype=torch.float32)
+    q_values = torch.zeros((1, 3), dtype=torch.float32)
+    model = _ConstantQModel(logits, q_values)
+    batch = _make_batch(3, batch_size=1, values=[0.0], actions=[2])
+    one_hot = torch.tensor([[0.0, 0.0, 1.0]], dtype=torch.float32)
+    batch = TrainingBatch(
+        features=batch.features,
+        policy=one_hot,
+        value=batch.value,
+        legal_mask=batch.legal_mask,
+        sample_weight=batch.sample_weight,
+        action=batch.action,
+    )
+
+    losses = compute_klent_losses(model, batch, KlentConfig())
+
+    assert float(losses.per_sample_target_entropy[0]) == pytest.approx(0.0, abs=1e-6)
+    assert float(losses.per_sample_policy_kl[0]) == pytest.approx(
+        float(losses.per_sample_policy_loss[0]),
+        abs=1e-6,
+    )
+
+
+def test_klent_loss_kl_is_zero_when_policy_matches_target() -> None:
+    target = torch.tensor([[0.4, 0.3, 0.2, 0.1]], dtype=torch.float32)
+    logits = torch.log(target)
+    q_values = torch.zeros((1, 4), dtype=torch.float32)
+    model = _ConstantQModel(logits, q_values)
+    batch = _make_batch(4, batch_size=1, values=[0.0], actions=[0])
+    batch = TrainingBatch(
+        features=batch.features,
+        policy=target,
+        value=batch.value,
+        legal_mask=batch.legal_mask,
+        sample_weight=batch.sample_weight,
+        action=batch.action,
+    )
+
+    losses = compute_klent_losses(model, batch, KlentConfig())
+
+    assert float(losses.per_sample_policy_kl[0]) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_klent_loss_diagnostics_ignore_illegal_logits() -> None:
+    base_logits = torch.tensor([[1.0, 0.0, -1.0, 0.5]], dtype=torch.float32)
+    extreme_logits = torch.tensor([[1.0, 1e30, -1.0, 0.5]], dtype=torch.float32)
+    q_values = torch.zeros((1, 4), dtype=torch.float32)
+    batch = _make_batch(4, batch_size=1, values=[0.0], actions=[0])
+    batch = TrainingBatch(
+        features=batch.features,
+        policy=torch.tensor([[0.4, 0.0, 0.4, 0.2]], dtype=torch.float32),
+        value=batch.value,
+        legal_mask=torch.tensor([[True, False, True, True]], dtype=torch.bool),
+        sample_weight=batch.sample_weight,
+        action=batch.action,
+    )
+
+    base = compute_klent_losses(_ConstantQModel(base_logits, q_values), batch, KlentConfig())
+    extreme = compute_klent_losses(
+        _ConstantQModel(extreme_logits, q_values),
+        batch,
+        KlentConfig(),
+    )
+
+    assert float(extreme.per_sample_policy_kl[0]) == pytest.approx(
+        float(base.per_sample_policy_kl[0]),
+        abs=1e-6,
+    )
+    assert bool(torch.isfinite(extreme.per_sample_target_entropy).all())
+
+
 def test_klent_loss_backpropagates_without_target_gradients() -> None:
     model = _TinyQModel(action_space=3)
     batch = _make_batch(3, batch_size=2, values=[0.5, -0.5], actions=[0, 1])

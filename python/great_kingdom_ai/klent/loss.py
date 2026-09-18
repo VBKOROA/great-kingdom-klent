@@ -17,13 +17,20 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class KlentLossBreakdown:
-    """Scalar losses plus per-sample diagnostics for priority bookkeeping."""
+    """Scalar losses plus per-sample diagnostics for priority bookkeeping.
+
+    ``per_sample_target_entropy`` and ``per_sample_policy_kl`` are detached
+    diagnostics that never enter the backward graph. ``policy_kl`` satisfies
+    ``policy_loss - target_entropy`` per sample before any aggregation.
+    """
 
     policy: Tensor
     q_value: Tensor
     total: Tensor
     per_sample_policy_loss: Tensor
     per_sample_q_error: Tensor
+    per_sample_target_entropy: Tensor
+    per_sample_policy_kl: Tensor
 
     def to_float_dict(self) -> dict[str, float]:
         return {
@@ -82,13 +89,34 @@ def compute_klent_losses(
     per_sample_q_error = (taken_q - values).pow(2)
     q_loss = _weighted_mean(per_sample_q_error, weights)
 
+    per_sample_target_entropy = _target_entropy(targets)
+    per_sample_policy_kl = per_sample_policy_loss.detach() - per_sample_target_entropy
+
     return KlentLossBreakdown(
         policy=policy_loss,
         q_value=q_loss,
         total=policy_loss_weight * policy_loss + value_loss_weight * q_loss,
         per_sample_policy_loss=per_sample_policy_loss,
         per_sample_q_error=per_sample_q_error,
+        per_sample_target_entropy=per_sample_target_entropy,
+        per_sample_policy_kl=per_sample_policy_kl,
     )
+
+
+def _target_entropy(targets: Tensor) -> Tensor:
+    """Return ``-sum(pi' * log(pi'))`` with zero-probability terms treated as zero.
+
+    The logarithm input is clamped before ``log`` so intermediate values are
+    finite even when a target probability is exactly zero.
+    """
+    torch = _import_torch()
+    tiny = torch.finfo(targets.dtype).tiny
+    safe_log_targets = torch.where(
+        targets > 0.0,
+        torch.log(targets.clamp_min(tiny)),
+        torch.zeros_like(targets),
+    )
+    return cast("Tensor", -(targets * safe_log_targets).sum(dim=1))
 
 
 def _validate_loss_weight(value: float, label: str) -> None:
