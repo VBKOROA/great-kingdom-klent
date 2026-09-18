@@ -106,6 +106,47 @@ def test_run_klent_training_publishes_iteration_checkpoints_and_shards(
 
 
 @requires_core
+def test_iteration_summary_reports_training_and_self_play_metrics(tmp_path: Path) -> None:
+    config = make_config(
+        tmp_path,
+        fit_epochs=2,
+        min_transitions=8,
+    )
+
+    summary = run_klent_training(config, iterations=1)[0]
+    payload = summary.to_dict()
+
+    assert payload["metrics_schema_version"] == 1
+    epoch_metrics = payload["epoch_metrics"]
+    assert isinstance(epoch_metrics, list)
+    assert len(epoch_metrics) == config.fit_epochs
+    assert [entry["epoch"] for entry in epoch_metrics] == [0, 1]
+    for entry in epoch_metrics:
+        for key in (
+            "policy_loss",
+            "q_loss",
+            "total_loss",
+            "target_policy_entropy",
+            "policy_kl",
+        ):
+            assert np.isfinite(entry[key])
+        assert entry["total_loss"] == pytest.approx(entry["policy_loss"] + entry["q_loss"])
+        assert entry["policy_kl"] == pytest.approx(
+            entry["policy_loss"] - entry["target_policy_entropy"]
+        )
+
+    self_play = payload["self_play_metrics"]
+    assert self_play["mean_game_length"] == pytest.approx(
+        summary.transitions / summary.games
+    )
+    assert self_play["pass_rate"] == pytest.approx(
+        self_play["pass_count"] / summary.transitions
+    )
+    assert sum(self_play["end_reason_counts"].values()) == summary.games
+    assert sum(self_play["end_reason_rates"].values()) == pytest.approx(1.0)
+
+
+@requires_core
 def test_run_klent_training_resumes_from_latest_checkpoint(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     run_klent_training(config, iterations=1)
@@ -792,7 +833,7 @@ def test_resume_false_interrupted_does_not_adopt_legacy_checkpoints(
 
     # 2. Start a fresh run with resume=False, interrupted before saving first checkpoint
     with unittest.mock.patch(
-        "great_kingdom_ai.klent.trainer.fit_klent_model",
+        "great_kingdom_ai.klent.trainer.fit_klent_model_detailed",
         side_effect=RuntimeError("interrupted before checkpoint"),
     ):
         with pytest.raises(RuntimeError, match="interrupted before checkpoint"):

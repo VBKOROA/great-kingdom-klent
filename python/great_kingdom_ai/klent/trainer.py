@@ -33,6 +33,13 @@ from great_kingdom_ai.klent.checkpoint import (
 )
 from great_kingdom_ai.klent.dataset import KlentReplayDataset
 from great_kingdom_ai.klent.loss import KlentLossBreakdown, compute_klent_losses
+from great_kingdom_ai.klent.metrics import (
+    METRICS_SCHEMA_VERSION,
+    EpochMetrics,
+    EpochMetricsAccumulator,
+    SelfPlayMetrics,
+    compute_self_play_metrics,
+)
 from great_kingdom_ai.klent.publish import (
     load_published_klent_onnx,
     publish_klent_onnx_artifacts,
@@ -124,6 +131,8 @@ class KlentIterationSummary:
     shard_path: Path
     checkpoint_path: Path
     epoch_losses: list[float]
+    epoch_metrics: list[EpochMetrics]
+    self_play_metrics: SelfPlayMetrics
     onnx_version_dir: Path | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -134,10 +143,22 @@ class KlentIterationSummary:
             "shard_path": str(self.shard_path),
             "checkpoint_path": str(self.checkpoint_path),
             "epoch_losses": self.epoch_losses,
+            "metrics_schema_version": METRICS_SCHEMA_VERSION,
+            "epoch_metrics": [metrics.to_dict() for metrics in self.epoch_metrics],
+            "self_play_metrics": self.self_play_metrics.to_dict(),
             "onnx_version_dir": (
                 None if self.onnx_version_dir is None else str(self.onnx_version_dir)
             ),
         }
+
+
+@dataclass(frozen=True)
+class KlentFitResult:
+    """Detailed training result while ``fit_klent_model`` keeps its tuple API."""
+
+    epoch_losses: list[float]
+    epoch_metrics: list[EpochMetrics]
+    steps: int
 
 
 def run_klent_training(
@@ -185,6 +206,7 @@ def run_klent_iteration(
     transition_count = sum(len(episode.transitions) for episode in episodes)
     if not episodes:
         raise RuntimeError("KLENT collection produced no episodes")
+    self_play_metrics = compute_self_play_metrics(episodes)
 
     store = TrajectoryReplayStore.from_episodes(max(transition_count, 1), episodes)
     metadata = KlentShardMetadata.from_config(
@@ -199,7 +221,7 @@ def run_klent_iteration(
 
     dataset = KlentReplayDataset(store, config=config.klent, metadata=metadata)
     model.train()
-    epoch_losses, total_steps = fit_klent_model(
+    fit_result = fit_klent_model_detailed(
         model,
         dataset,
         config,
@@ -209,6 +231,7 @@ def run_klent_iteration(
         scaler=state.scaler,
     )
     model.eval()
+    total_steps = fit_result.steps
 
     next_iteration = iteration + 1
     next_state = KlentTrainState(
@@ -255,7 +278,9 @@ def run_klent_iteration(
         transitions=len(store),
         shard_path=shard_path,
         checkpoint_path=checkpoint_path,
-        epoch_losses=epoch_losses,
+        epoch_losses=fit_result.epoch_losses,
+        epoch_metrics=fit_result.epoch_metrics,
+        self_play_metrics=self_play_metrics,
         onnx_version_dir=onnx_version_dir,
     )
 
@@ -270,7 +295,36 @@ def fit_klent_model(
     iteration: int,
     scaler: Any | None = None,
 ) -> tuple[list[float], int]:
-    """Fit for ``fit_epochs`` shuffled passes over the frozen iteration buffer."""
+    """Fit and return the historical ``(epoch_losses, steps)`` tuple."""
+    result = fit_klent_model_detailed(
+        model,
+        dataset,
+        config,
+        optimizer,
+        start_steps=start_steps,
+        iteration=iteration,
+        scaler=scaler,
+    )
+    return result.epoch_losses, result.steps
+
+
+def fit_klent_model_detailed(
+    model: nn.Module,
+    dataset: KlentReplayDataset,
+    config: KlentTrainConfig,
+    optimizer: Optimizer,
+    *,
+    start_steps: int,
+    iteration: int,
+    scaler: Any | None = None,
+) -> KlentFitResult:
+    """Fit for ``fit_epochs`` shuffled passes over the frozen iteration buffer.
+
+    Diagnostics accumulate detached per-sample scalars on device and are read
+    back once per epoch. ``epoch_losses`` keeps the historical unweighted mean
+    of batch total-loss means; ``epoch_metrics`` aggregates the same per-sample
+    losses with ``sum(sample_weight * value) / sum(sample_weight)``.
+    """
     torch = _import_torch()
     amp_enabled = _cuda_amp_enabled(torch, config.device, enabled=config.amp)
     scaler = scaler if amp_enabled else None
@@ -278,16 +332,29 @@ def fit_klent_model(
     augment_rng = random.Random(config.seed + iteration)
     steps = start_steps
     epoch_losses: list[float] = []
-    for _epoch in range(config.fit_epochs):
+    epoch_metrics: list[EpochMetrics] = []
+    for epoch in range(config.fit_epochs):
         order = permutation_rng.permutation(len(dataset))
         batch_total = 0.0
         batch_count = 0
+        accumulator: EpochMetricsAccumulator | None = None
         for start in range(0, len(order), config.batch_size):
             indexes = np.asarray(order[start : start + config.batch_size], dtype=np.int64)
             batch = _klent_batch_from_indexes(dataset, indexes, config, augment_rng)
             optimizer.zero_grad(set_to_none=True)
             with _autocast_context(torch, enabled=amp_enabled):
                 losses = compute_klent_losses(model, batch, config.klent)
+            if accumulator is None:
+                accumulator = EpochMetricsAccumulator.create(
+                    torch,
+                    device=batch.sample_weight.device,
+                )
+            accumulator.add(
+                policy_loss=losses.per_sample_policy_loss.detach(),
+                q_loss=losses.per_sample_q_error.detach(),
+                target_entropy=losses.per_sample_target_entropy,
+                sample_weight=batch.sample_weight.detach(),
+            )
             if scaler is not None:
                 scaler.scale(losses.total).backward()
                 if config.gradient_clip_norm is not None:
@@ -307,8 +374,15 @@ def fit_klent_model(
             steps += 1
             batch_total += float(losses.total.detach().cpu())
             batch_count += 1
+        if accumulator is None:
+            raise ValueError("KLENT fitting produced no batches for epoch metrics")
         epoch_losses.append(batch_total / max(batch_count, 1))
-    return epoch_losses, steps
+        epoch_metrics.append(accumulator.finalize(epoch))
+    return KlentFitResult(
+        epoch_losses=epoch_losses,
+        epoch_metrics=epoch_metrics,
+        steps=steps,
+    )
 
 
 def compute_iteration_loss(
@@ -892,10 +966,12 @@ def _onnx_version_dir(work_dir: Path, model_version: int) -> Path:
 
 
 __all__ = [
+    "KlentFitResult",
     "KlentIterationSummary",
     "KlentTrainConfig",
     "compute_iteration_loss",
     "fit_klent_model",
+    "fit_klent_model_detailed",
     "iter_klent_training",
     "run_klent_iteration",
     "run_klent_training",
