@@ -458,6 +458,10 @@ KLENT snapshot끼리 비교하려면 `--best /path/to/other-klent-snapshot.pt`�
 재평가한다. `summary.promoted`는 승률 문턱 충족 여부이며 최강 모델 보장이 아니다.
 위 명령에는 `--promote`가 없으므로 상대 checkpoint를 교체하지 않는다.
 
+Gumbel 탐색 파라미터 중 `gumbel_c_scale`은 실제 착수 결정에 직접 작용하며, 실측 벤치마크상
+`1.0`이 `0.1` 대비 81.7%의 압도적인 우세를 보였다. 자세한 분석은
+[Gumbel c_scale 벤치마크](gumbel-c-scale-benchmark.md)를 참고한다.
+
 ### 6.3. ONNX backend용 고정 모델 준비 (선택)
 
 가장 간단한 방법은 이미 공개된 eval ONNX를 별도 평가 디렉터리에 복사하는 것이다.
