@@ -97,6 +97,7 @@ FP32 비교용이며 CUDA FP16 오차 측정은 별도 검증이 필요하다.
 
 - 프로세스가 성공 종료하고 마지막 JSON에 iteration 0, 1의 결과가 있다.
 - 각 반복의 `transitions`가 최소 수집량 이상이고 `epoch_losses`가 유한하다.
+- 새 `epoch_metrics`와 `self_play_metrics`가 유한하고 종료 원인별 대국 수 합이 `games`와 같다.
 - `checkpoints/latest.pt`, `onnx/current.json`, version 2의 actor/eval/manifest가 존재한다.
 - FP32 manifest의 두 `parity_passed`는 모두 true다. FP16에서는 검사를 생략했으므로 false다.
 
@@ -170,6 +171,68 @@ Ctrl+C로 중단하면 종료 코드 130을 반환한다. 오류가 발생하면
 재개하면 마지막 완료 checkpoint를 복원한 뒤 실패한 반복의 수집부터 다시 시작한다.
 `--no-resume`나 checkpoint 삭제는 필요 없다. 상한을 늘려도 목표를 못 채우면 다시 중단한다.
 대국 길이가 계속 줄어들면 종료 원인과 pass 빈도, arena 기력을 함께 확인한다.
+
+### 3.1. 반복 JSON 진단 지표
+
+각 반복 결과 JSON에는 기존 필드(`games`, `transitions`, `epoch_losses` 등)와 함께
+`metrics_schema_version`, `epoch_metrics`, `self_play_metrics`가 포함된다. 별도 플래그는
+필요 없고 `--iterations`와 `--loop` 모두 같은 스키마를 쓴다. 예시는 다음과 같다.
+
+```json
+{
+  "iteration": 0,
+  "epoch_losses": [1.5],
+  "metrics_schema_version": 1,
+  "epoch_metrics": [
+    {
+      "epoch": 0,
+      "policy_loss": 1.2,
+      "q_loss": 0.3,
+      "total_loss": 1.5,
+      "target_policy_entropy": 1.1,
+      "policy_kl": 0.1
+    }
+  ],
+  "self_play_metrics": {
+    "mean_game_length": 48.0,
+    "pass_count": 1536,
+    "pass_rate": 0.041666666666666664,
+    "end_reason_counts": {
+      "opponent_castle_destroyed": 192,
+      "own_castle_destroyed": 0,
+      "consecutive_passes": 576
+    },
+    "end_reason_rates": {
+      "opponent_castle_destroyed": 0.25,
+      "own_castle_destroyed": 0.0,
+      "consecutive_passes": 0.75
+    }
+  }
+}
+```
+
+`epoch_metrics`는 각 optimizer 갱신 직전, 즉 그 배치를 학습하기 전에 측정한 값의 epoch
+집계다. 고정된 최종 checkpoint의 평가 손실이 아니다. 자연로그(nats)를 쓰고 각 항목은
+`sum(sample_weight * 값) / sum(sample_weight)`로 가중 평균한다. `policy_loss`는 저장된
+정책 `pi'`의 cross-entropy, `target_policy_entropy`는 `pi'`의 엔트로피,
+`policy_kl = policy_loss - target_policy_entropy`다. `q_loss`는 선택한 수의 Q MSE이고
+`total_loss = policy_loss + q_loss`다. 정책 손실이 커졌을 때 목표 엔트로피 증가와 KL 증가를
+구분해서 볼 수 있다.
+
+기존 `epoch_losses`는 호환을 위해 **배치별 total loss 평균의 비가중 평균**을 그대로 유지한다.
+`epoch_metrics[].total_loss`는 같은 per-sample 손실을 sample weight로 가중 집계하므로 마지막
+배치 크기가 다르거나 sample weight가 불균일하면 두 값이 다를 수 있다. 이는 버그가 아니라
+정의 차이다.
+
+`self_play_metrics`는 수집 직후, 증강 전 완결 대국으로 계산한다. `mean_game_length`는 전체
+transition을 대국 수로 나눈 값이고 `pass_rate`는 **전체 착수 중 pass의 비율**이다(대국별
+pass 비율의 평균이 아니다). `end_reason_counts`와 `end_reason_rates`는 종료 원인별 대국 수와
+비율이며 알려진 코드는 0이어도 항상 출력한다. 알 수 없는 코드는 `unknown_<code>`로 남겨
+대국 수와 비율이 합에서 어긋나지 않게 한다. 대국 길이 상한 초과는 정상 종료가 아니라 오류다.
+
+측정값이 유한하지 않으면 JSON으로 출력하지 않고 측정 위치를 포함한 예외를 발생시킨다. 과거
+로그나 새 필드가 없는 로그는 해당 값을 미측정으로 간주한다. checkpoint와 shard 형식은
+그대로라 기존 checkpoint에서 재개할 수 있고, 지난 반복의 지표를 소급해 채우지 않는다.
 
 ## 4. 중단과 재개
 
@@ -586,7 +649,8 @@ CPU에서 FP16 그래프 로드·추론을 검증해도 CUDA FP16/AMP 검증은 
 FP32 공개가 통과했다. 이는 Runpod의 기본 배치 크기, CUDA AMP/FP16 안정성, 장시간 메모리,
 처리량 또는 기력을 검증한 결과는 아니다.
 GPU 검증에서는 최대 VRAM, 유한 loss, 수집 transition 수, 전체 반복 시간을 기록한다.
-현재 CLI는 단계별 시간·최대 VRAM·NaN 통계를 자동 보고하지 않는다.
+현재 CLI는 epoch metrics와 self-play 지표(3.1절)는 보고하지만 단계별 시간·최대 VRAM은
+자동 보고하지 않는다. 비유한 진단값은 JSON으로 내보내지 않고 예외로 중단한다.
 검색 없는 평가와 Gumbel Arena의 기력 비교는 별도 평가 단계이며 학습 명령만으로 수행되지 않는다.
 6절은 PyTorch checkpoint 및 ONNX arena 경로를 사용하는 운영 절차다. 실제 학습 모델의 Runpod 대국 결과나
 32/8 대비 32/4의 우위를 검증한 결과를 의미하지 않는다.
